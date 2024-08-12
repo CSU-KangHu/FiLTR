@@ -6,6 +6,8 @@ import os
 
 from Util import read_fasta, get_overlap_len, multi_process_align_v1, map_fragment, multi_process_align_v2
 
+current_folder = os.path.dirname(os.path.abspath(__file__))
+project_dir = os.path.join(current_folder, ".")
 
 def get_chr_fragments(BlastnOut):
     chr_fragments = {}
@@ -215,6 +217,8 @@ if __name__ == '__main__':
                         help='Finding thresholds for full-length copies. Three common thresholds: 0.80, 0.95, and 0.99.')
     parser.add_argument('--cat', metavar='TE category',
                         help='TE category: LTR|LINE|SINE|DNA|Helitron|Total')
+    parser.add_argument('--is_full_length', metavar='is_full_length',
+                        help='Should only full-length copies be calculated? 1 for yes, 0 for no.')
 
     args = parser.parse_args()
     genome_path = args.g
@@ -225,9 +229,11 @@ if __name__ == '__main__':
     coverage_threshold = args.coverage_threshold
     category = args.cat
     skip_blastn = args.skip_blastn
+    is_full_length = args.is_full_length
 
     default_skip_blastn = 0
     default_coverage_threshold = 0.95
+    default_is_full_length = 0
 
     if skip_blastn is not None:
         skip_blastn = int(skip_blastn)
@@ -238,6 +244,11 @@ if __name__ == '__main__':
         coverage_threshold = float(coverage_threshold)
     else:
         coverage_threshold = default_coverage_threshold
+
+    if is_full_length is not None:
+        is_full_length = float(is_full_length)
+    else:
+        is_full_length = default_is_full_length
 
     std_tmp_blast_dir = work_dir + '/std_blastn'
     standard_lib_out = work_dir + '/std_full_length.out'
@@ -259,11 +270,11 @@ if __name__ == '__main__':
         # Due to RepeatMasker sometimes skipping large gaps, which leads to inaccurate alignment and affects our evaluation results,
         # we opted to employ blastn for alignment. Additionally, we noticed issues with oversized test libraries causing blastn output to balloon.
         # To address this, we initially invoke the function to retrieve full-length copies in a single thread, before consolidating all full-length copies.
-        tools_dir = os.getcwd() + '/tools'
+        tools_dir = project_dir + '/tools'
         multi_process_align_v1(standard_lib, genome_path, standard_lib_out, std_tmp_blast_dir, thread, chrom_length,
-                               coverage_threshold, category, is_removed_dir=True)
+                               coverage_threshold, category, is_full_length, is_removed_dir=True)
         multi_process_align_v1(test_lib, genome_path, test_lib_out, test_tmp_blast_dir, thread, chrom_length,
-                               coverage_threshold, category, is_removed_dir=True)
+                               coverage_threshold, category, is_full_length, is_removed_dir=True)
 
         # multi_process_align_v2(standard_lib, genome_path, standard_lib_out, std_tmp_blast_dir, thread, chrom_length, coverage_threshold, category, tools_dir, is_removed_dir = False)
         # multi_process_align_v2(test_lib, genome_path, test_lib_out, test_tmp_blast_dir, thread, chrom_length, coverage_threshold, category, tools_dir, is_removed_dir = False)

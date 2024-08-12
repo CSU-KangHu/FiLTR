@@ -157,7 +157,7 @@ if __name__ == '__main__':
                           + reference + ' --standard_lib ' + lib_path \
                           + ' --test_lib ' + TE_lib + ' --work_dir ' + tmp_output_dir \
                           + ' --coverage_threshold ' + str(coverage_threshold) + ' --thread ' + str(threads) \
-                          + ' ' + ' --cat Total ' + ' >> ' + hite_out
+                          + ' ' + ' --cat Total ' + ' --is_full_length 1 ' + ' >> ' + hite_out
         log.logger.debug(bm_hite_command)
         os.system(bm_hite_command)
     else:

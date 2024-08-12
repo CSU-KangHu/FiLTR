@@ -115,7 +115,7 @@ def purge_internal_seq_by_table(query_path, subject_path, clean_query_path, tabl
                 q_end = tmp
             s_start = int(parts[4])
             s_end = int(parts[5])
-            if float(abs(s_end-s_start))/subject_len >= 0.8:
+            if float(abs(s_end-s_start))/subject_len >= 0.5:
                 if not query_records.__contains__(query_name):
                     query_records[query_name] = []
                 subject_pos = query_records[query_name]
@@ -128,8 +128,6 @@ def purge_internal_seq_by_table(query_path, subject_path, clean_query_path, tabl
         subject_pos = query_records[query_name]
         if query_name not in query_contigs:
             continue
-        # if query_name == 'Chr450_26134790-26154779-int#LTR':
-        #     print('h')
         query_seq = query_contigs[query_name]
 
         connected_segs = merge_intervals(subject_pos)

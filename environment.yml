@@ -24,6 +24,7 @@ dependencies:
   - fuzzysearch
   - mafft
   - ninja-nj
+  - emboss
   - pip
   - pip:
     - python-Levenshtein

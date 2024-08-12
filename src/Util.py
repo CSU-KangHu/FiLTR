@@ -63,7 +63,32 @@ def save_dict_to_fasta(data_dict, fasta_file):
             for line in seq_lines:
                 file.write(line + "\n")
 
+def split_chromosomes(chromosomes_dict, max_length=400_000_000):
+    """
+    分割染色体序列，如果序列长度超过max_length，则将其分割成多个部分。
+
+    参数:
+    chromosomes_dict (dict): 一个字典，键为染色体名称，值为对应的DNA序列。
+    max_length (int): 最大序列长度，超过此长度的序列将被分割。默认值为200 MB。
+
+    返回:
+    dict: 一个新的字典，包含分割后的染色体序列。
+    """
+    new_chromosomes_dict = {}
+    for chrom, sequence in chromosomes_dict.items():
+        if len(sequence) > max_length:
+            num_parts = (len(sequence) + max_length - 1) // max_length  # 计算需要分割的部分数
+            for i in range(num_parts):
+                part_name = f"{chrom}_part{i + 1}"
+                start = i * max_length
+                end = min((i + 1) * max_length, len(sequence))
+                new_chromosomes_dict[part_name] = sequence[start:end]
+        else:
+            new_chromosomes_dict[chrom] = sequence
+    return new_chromosomes_dict
+
 def split_dict_into_blocks(chromosomes_dict, threads):
+    chromosomes_dict = split_chromosomes(chromosomes_dict)
     total_length = sum(len(seq) for seq in chromosomes_dict.values())
     target_length = total_length // threads
 
@@ -297,12 +322,15 @@ def get_full_length_copies_v1(query_path, split_ref_dir, max_copy_num, full_leng
 def multiple_alignment_blast_and_get_copies_v2(repeats_path, max_copy_num, full_length_threshold):
     split_repeats_path = repeats_path[0]
     split_ref_dir = repeats_path[1]
+    # raw_blastn2Results_path = repeats_path[2]
+    # os.system('rm -f ' + raw_blastn2Results_path)
     blastn2Results_path = repeats_path[2]
     os.system('rm -f ' + blastn2Results_path)
     all_copies = {}
     repeat_names, repeat_contigs = read_fasta(split_repeats_path)
     remain_contigs = repeat_contigs
     for chr_name in os.listdir(split_ref_dir):
+        # blastn2Results_path = raw_blastn2Results_path + '_' + str(chr_name)
         if len(remain_contigs) > 0:
             if not str(chr_name).endswith('.fa'):
                 continue
@@ -324,9 +352,6 @@ def multiple_alignment_blast_and_get_copies_v2(repeats_path, max_copy_num, full_
                     del repeat_contigs[query_name]
             remain_contigs = repeat_contigs
             store_fasta(remain_contigs, split_repeats_path)
-
-    # 对于未能获取拷贝的序列，我们使用它原始序列表示
-
 
     # all_copies = get_copies_v1(blastn2Results_path, split_repeats_path, '')
     return all_copies
@@ -831,9 +856,10 @@ def generate_left_frame_from_seq(candidate_sequence_path, reference, threads, te
     dtime = endtime - starttime
     return all_left_frames
 
-def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanking_len, threads, temp_dir, output_dir, full_length_output_dir, split_ref_dir):
+def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanking_len, full_length_flanking_len,
+                                      threads, temp_dir, output_dir, full_length_output_dir, split_ref_dir,
+                                      max_copy_num, full_length_threshold,):
     debug = 0
-    # flanking_len = 100
     starttime = time.time()
     if os.path.exists(temp_dir):
         os.system('rm -rf ' + temp_dir)
@@ -874,7 +900,7 @@ def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanki
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for cur_split_files in split_files:
-        job = ex.submit(get_full_length_copies, cur_split_files, split_ref_dir, debug)
+        job = ex.submit(get_full_length_copies_v1, cur_split_files, split_ref_dir, max_copy_num, full_length_threshold, debug)
         jobs.append(job)
     ex.shutdown(wait=True)
     all_copies = {}
@@ -884,6 +910,8 @@ def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanki
     # extend copies
     batch_member_files = []
     new_all_copies = {}
+    full_length_batch_member_files = []
+    full_length_new_all_copies = {}
     for query_name in all_copies.keys():
         copies = all_copies[query_name]
         for copy in copies:
@@ -905,23 +933,44 @@ def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanki
             copy_contigs = new_all_copies[query_name]
             copy_contigs[new_name] = copy_seq
             new_all_copies[query_name] = copy_contigs
+
+            if copy_ref_start - 1 - full_length_flanking_len < 0 or copy_ref_end + full_length_flanking_len > len(ref_contigs[ref_name]):
+                continue
+            full_length_copy_seq = ref_contigs[ref_name][copy_ref_start - 1 - full_length_flanking_len: copy_ref_end + full_length_flanking_len]
+            if direct == '-':
+                full_length_copy_seq = getReverseSequence(full_length_copy_seq)
+            if len(full_length_copy_seq) < 100 or len(full_length_copy_seq) > 2000:
+                continue
+            new_name = ref_name + ':' + str(copy_ref_start) + '-' + str(copy_ref_end) + '-full_length(' + direct + ')'
+            if not full_length_new_all_copies.__contains__(query_name):
+                full_length_new_all_copies[query_name] = {}
+            full_length_copy_contigs = full_length_new_all_copies[query_name]
+            full_length_copy_contigs[new_name] = full_length_copy_seq
+            full_length_new_all_copies[query_name] = full_length_copy_contigs
     for query_name in new_all_copies.keys():
         copy_contigs = new_all_copies[query_name]
         cur_member_file = temp_dir + '/' + query_name + '.blast.bed.fa'
         store_fasta(copy_contigs, cur_member_file)
-        batch_member_files.append((query_name, cur_member_file))
+
+        cur_full_length_member_file = None
+        if query_name in full_length_new_all_copies:
+            full_length_copy_contigs = full_length_new_all_copies[query_name]
+            cur_full_length_member_file = temp_dir + '/' + query_name + '.full_length.blast.bed.fa'
+            store_fasta(full_length_copy_contigs, cur_full_length_member_file)
+
+        batch_member_files.append((query_name, cur_member_file, cur_full_length_member_file))
 
     # subset_script_path = config.project_dir + '/tools/ready_for_MSA.sh'
     # Determine whether the multiple sequence alignment of each copied file satisfies the homology rule
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for batch_member_file in batch_member_files:
-        job = ex.submit(generate_msa, batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, debug)
+        job = ex.submit(generate_msa, batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, full_length_flanking_len, debug)
         jobs.append(job)
     ex.shutdown(wait=True)
 
     for job in as_completed(jobs):
-        left_frame_path, full_length_align_file = job.result()
+        left_frame_path = job.result()
 
     endtime = time.time()
     dtime = endtime - starttime
@@ -1092,8 +1141,8 @@ def extract_copies(member_file, max_num):
     store_fasta(new_contigs, member_file)
     return member_file
 
-def generate_msa(batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, debug):
-    (query_name, member_file) = batch_member_file
+def generate_msa(batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, full_length_flanking_len, debug):
+    (query_name, member_file, full_length_member_file) = batch_member_file
 
     member_names, member_contigs = read_fasta(member_file)
     if len(member_names) > 100:
@@ -1107,12 +1156,33 @@ def generate_msa(batch_member_file, temp_dir, output_dir, full_length_output_dir
     os.system(align_command)
     # left_frame_path = get_left_frame(query_name, cur_seq, align_file, output_dir, debug)
     if len(member_names) >= 1:
+        # cur_seq = member_contigs[member_names[0]][flanking_len:-flanking_len]
+        # both_end_frame_path, full_length_align_file = get_both_ends_frame(query_name, cur_seq, align_file, output_dir, full_length_output_dir, flanking_len, debug)
+
         cur_seq = member_contigs[member_names[0]][flanking_len:-flanking_len]
-        both_end_frame_path, full_length_align_file = get_both_ends_frame(query_name, cur_seq, align_file, output_dir, full_length_output_dir, flanking_len, debug)
+        both_end_frame_path = get_both_ends_frame_v1(query_name, cur_seq, align_file, output_dir, flanking_len, debug)
     else:
         both_end_frame_path = ''
-        full_length_align_file = ''
-    return both_end_frame_path, full_length_align_file
+
+    if full_length_member_file is not None:
+        full_length_member_names, full_length_member_contigs = read_fasta(full_length_member_file)
+        if len(full_length_member_names) > 100:
+            # 抽取100条最长的 拷贝
+            max_num = 100
+            full_length_member_file = extract_copies(full_length_member_file, max_num)
+        if not os.path.exists(full_length_member_file):
+            return None, None
+        full_length_align_file = full_length_member_file + '.maf.fa'
+        align_command = 'cd ' + temp_dir + ' && mafft --preservecase --quiet --thread 1 ' + full_length_member_file + ' > ' + full_length_align_file
+        os.system(align_command)
+        # left_frame_path = get_left_frame(query_name, cur_seq, align_file, output_dir, debug)
+        if len(full_length_member_names) >= 1:
+            cur_seq = full_length_member_contigs[full_length_member_names[0]][full_length_flanking_len:-full_length_flanking_len]
+            full_length_align_file = get_both_ends_frame_v2(query_name, cur_seq, full_length_align_file, full_length_output_dir,
+                                                            full_length_flanking_len, debug)
+        else:
+            full_length_align_file = ''
+    return both_end_frame_path
 
 
 def remove_sparse_col_in_align_file(align_file, align_start, align_end):
@@ -1244,34 +1314,180 @@ def get_both_ends_frame(query_name, cur_seq, align_file, output_dir, full_length
 
             f_save.write(seq1+'\t'+seq2+'\n')
 
-        full_length_align_file = full_length_output_dir + '/' + query_name + '.matrix'
-        with open(full_length_align_file, 'w') as f_save:
-            for name in align_names:
-                raw_align_seq = align_contigs[name]
-                # 取左侧 100 bp frame
-                if align_start - out_threshold < 0:
-                    start_pos = 0
-                else:
-                    start_pos = align_start - out_threshold
-                start_seq = raw_align_seq[start_pos: align_start]
-                # 补全不足 100 bp的部分
-                seq1 = '-' * (out_threshold - len(start_seq)) + start_seq
+    full_length_align_file = full_length_output_dir + '/' + query_name + '.matrix'
+    with open(full_length_align_file, 'w') as f_save:
+        for name in align_names:
+            raw_align_seq = align_contigs[name]
+            # 取左侧 100 bp frame
+            if align_start - out_threshold < 0:
+                start_pos = 0
+            else:
+                start_pos = align_start - out_threshold
+            start_seq = raw_align_seq[start_pos: align_start]
+            # 补全不足 100 bp的部分
+            seq1 = '-' * (out_threshold - len(start_seq)) + start_seq
 
-                # 取中间的序列
-                middle_seq = raw_align_seq[align_start: align_end]
+            # 取中间的序列
+            middle_seq = raw_align_seq[align_start: align_end]
 
-                # 取右侧侧 100 bp frame
-                if align_end + out_threshold > len(raw_align_seq):
-                    end_pos = len(raw_align_seq)
-                else:
-                    end_pos = align_end + out_threshold
-                end_seq = raw_align_seq[align_end: end_pos]
-                # 补全不足 100 bp的部分
-                seq2 = end_seq + '-' * (out_threshold - len(end_seq))
+            # 取右侧侧 100 bp frame
+            if align_end + out_threshold > len(raw_align_seq):
+                end_pos = len(raw_align_seq)
+            else:
+                end_pos = align_end + out_threshold
+            end_seq = raw_align_seq[align_end: end_pos]
+            # 补全不足 100 bp的部分
+            seq2 = end_seq + '-' * (out_threshold - len(end_seq))
 
-                f_save.write(seq1 + middle_seq + seq2 + '\n')
+            f_save.write(seq1 + middle_seq + seq2 + '\n')
 
     return start_align_file, full_length_align_file
+
+
+def get_both_ends_frame_v2(query_name, cur_seq, align_file, full_length_output_dir, flanking_len, debug):
+    anchor_len = 20
+    first_10bp = cur_seq[0:anchor_len]
+    last_10bp = cur_seq[-anchor_len:]
+    align_names, align_contigs = read_fasta(align_file)
+    align_start = -1
+    align_end = -1
+    for name in align_names:
+        raw_align_seq = align_contigs[name]
+        align_seq = ''
+        position_reflex = {}
+        cur_align_index = 0
+        for i, base in enumerate(raw_align_seq):
+            if base == '-':
+                continue
+            else:
+                align_seq += base
+                position_reflex[cur_align_index] = i
+                cur_align_index += 1
+
+        start_dist = 2
+        last_dist = 2
+        first_matches = find_near_matches(first_10bp, align_seq, max_l_dist=start_dist)
+        last_matches = find_near_matches(last_10bp, align_seq, max_l_dist=last_dist)
+        last_matches = last_matches[::-1]
+        if len(first_matches) > 0 and len(last_matches) > 0:
+            align_no_gap_start = first_matches[0].start
+            align_no_gap_end = last_matches[0].end - 1
+            align_start = position_reflex[align_no_gap_start]
+            align_end = position_reflex[align_no_gap_end]
+            break
+    if debug:
+        print(align_file, align_start, align_end)
+    if align_start == -1 or align_end == -1:
+        if debug:
+            print('not found boundary:' + align_file)
+        return None, None
+    # print(align_start, align_end)
+    # 清理 align file 中的稀疏列，并生成新的 align_start, align_end 位置
+    align_file, align_start, align_end = remove_sparse_col_in_align_file(align_file, align_start, align_end)
+    # print(align_start, align_end)
+    align_names, align_contigs = read_fasta(align_file)
+
+    # 取 align_start 的外侧 100 bp
+    out_threshold = flanking_len
+    full_length_align_file = full_length_output_dir + '/' + query_name + '.matrix'
+    with open(full_length_align_file, 'w') as f_save:
+        for name in align_names:
+            raw_align_seq = align_contigs[name]
+            # 取左侧 100 bp frame
+            if align_start - out_threshold < 0:
+                start_pos = 0
+            else:
+                start_pos = align_start - out_threshold
+            start_seq = raw_align_seq[start_pos: align_start]
+            # 补全不足 100 bp的部分
+            seq1 = '-' * (out_threshold - len(start_seq)) + start_seq
+
+            # 取中间的序列
+            middle_seq = raw_align_seq[align_start: align_end]
+
+            # 取右侧侧 100 bp frame
+            if align_end + out_threshold > len(raw_align_seq):
+                end_pos = len(raw_align_seq)
+            else:
+                end_pos = align_end + out_threshold
+            end_seq = raw_align_seq[align_end: end_pos]
+            # 补全不足 100 bp的部分
+            seq2 = end_seq + '-' * (out_threshold - len(end_seq))
+
+            f_save.write(seq1 + middle_seq + seq2 + '\n')
+
+    return full_length_align_file
+
+def get_both_ends_frame_v1(query_name, cur_seq, align_file, output_dir, flanking_len, debug):
+    anchor_len = 20
+    first_10bp = cur_seq[0:anchor_len]
+    last_10bp = cur_seq[-anchor_len:]
+    align_names, align_contigs = read_fasta(align_file)
+    align_start = -1
+    align_end = -1
+    for name in align_names:
+        raw_align_seq = align_contigs[name]
+        align_seq = ''
+        position_reflex = {}
+        cur_align_index = 0
+        for i, base in enumerate(raw_align_seq):
+            if base == '-':
+                continue
+            else:
+                align_seq += base
+                position_reflex[cur_align_index] = i
+                cur_align_index += 1
+
+        start_dist = 2
+        last_dist = 2
+        first_matches = find_near_matches(first_10bp, align_seq, max_l_dist=start_dist)
+        last_matches = find_near_matches(last_10bp, align_seq, max_l_dist=last_dist)
+        last_matches = last_matches[::-1]
+        if len(first_matches) > 0 and len(last_matches) > 0:
+            align_no_gap_start = first_matches[0].start
+            align_no_gap_end = last_matches[0].end - 1
+            align_start = position_reflex[align_no_gap_start]
+            align_end = position_reflex[align_no_gap_end]
+            break
+    if debug:
+        print(align_file, align_start, align_end)
+    if align_start == -1 or align_end == -1:
+        if debug:
+            print('not found boundary:' + align_file)
+        return None, None
+    # print(align_start, align_end)
+    # 清理 align file 中的稀疏列，并生成新的 align_start, align_end 位置
+    align_file, align_start, align_end = remove_sparse_col_in_align_file(align_file, align_start, align_end)
+    # print(align_start, align_end)
+    align_names, align_contigs = read_fasta(align_file)
+
+    # 取 align_start 的外侧 100 bp
+    out_threshold = flanking_len
+    start_align_file = output_dir + '/' + query_name + '.matrix'
+    with open(start_align_file, 'w') as f_save:
+        for name in align_names:
+            raw_align_seq = align_contigs[name]
+            # 取左侧 100 bp frame
+            if align_start - out_threshold < 0:
+                start_pos = 0
+            else:
+                start_pos = align_start - out_threshold
+            start_seq = raw_align_seq[start_pos: align_start]
+            # 补全不足 100 bp的部分
+            seq1 = '-' * (out_threshold - len(start_seq)) + start_seq
+
+            # 取右侧 100 bp frame
+            if align_end + out_threshold > len(raw_align_seq):
+                end_pos = len(raw_align_seq)
+            else:
+                end_pos = align_end + out_threshold
+            end_seq = raw_align_seq[align_end: end_pos]
+            # 补全不足 100 bp的部分
+            seq2 = end_seq + '-' * (out_threshold - len(end_seq))
+
+            f_save.write(seq1+'\t'+seq2+'\n')
+
+    return start_align_file
 
 def get_left_frame(query_name, cur_seq, align_file, output_dir, debug):
     anchor_len = 20
@@ -1399,6 +1615,7 @@ def TSDsearch_v5(raw_align_seq, cur_boundary_start, cur_boundary_end):
             right_tsd_seq = right_tsd
     return left_tsd_seq, right_tsd_seq
 
+
 def read_matrix_file(matrix_file):
     align_names = []
     align_contigs = {}
@@ -1412,7 +1629,8 @@ def read_matrix_file(matrix_file):
             index_num += 1
     return align_names, align_contigs
 
-def judge_boundary_v5(matrix_file, ltr_name, TE_type, plant):
+
+def judge_boundary_v5(matrix_file, ltr_name, TE_type, flanking_len):
     align_names, align_contigs = read_matrix_file(matrix_file)
 
     debug = 0
@@ -1471,16 +1689,16 @@ def judge_boundary_v5(matrix_file, ltr_name, TE_type, plant):
     else:
         homo_threshold = 0.75
 
-    align_start = 100
-    align_end = col_num - 100
+    align_start = flanking_len
+    align_end = col_num - flanking_len
 
     homo_boundary_start = search_boundary_homo_v3(valid_col_threshold, align_start, matrix, row_num,
-                                             col_num, 'start', homo_threshold, debug, sliding_window_size)
+                                             col_num, 'start', homo_threshold, debug, sliding_window_size, flanking_len)
     if homo_boundary_start == -1:
         return ltr_name, False, '', ''
 
     homo_boundary_end = search_boundary_homo_v3(valid_col_threshold, align_end, matrix, row_num,
-                                           col_num, 'end', homo_threshold, debug, sliding_window_size)
+                                           col_num, 'end', homo_threshold, debug, sliding_window_size, flanking_len)
 
     if homo_boundary_end == -1:
         return ltr_name, False, '', ''
@@ -1639,7 +1857,7 @@ def judge_boundary_v5(matrix_file, ltr_name, TE_type, plant):
         print(matrix_file, is_TE, final_boundary_start, final_boundary_end)
     return ltr_name, is_TE, '', final_cons_seq
 
-def judge_boundary_v6(matrix_file, ltr_name):
+def judge_boundary_v6(matrix_file, ltr_name, flanking_len):
     align_names, align_contigs = read_matrix_file(matrix_file)
 
     debug = 0
@@ -1698,16 +1916,16 @@ def judge_boundary_v6(matrix_file, ltr_name):
     else:
         homo_threshold = 0.75
 
-    align_start = 100
-    align_end = col_num - 100
+    align_start = flanking_len
+    align_end = col_num - flanking_len
 
     homo_boundary_start = search_boundary_homo_v3(valid_col_threshold, align_start, matrix, row_num,
-                                             col_num, 'start', homo_threshold, debug, sliding_window_size)
+                                             col_num, 'start', homo_threshold, debug, sliding_window_size, flanking_len)
     if homo_boundary_start == -1:
         return ltr_name, False, '', ''
 
     homo_boundary_end = search_boundary_homo_v3(valid_col_threshold, align_end, matrix, row_num,
-                                           col_num, 'end', homo_threshold, debug, sliding_window_size)
+                                           col_num, 'end', homo_threshold, debug, sliding_window_size, flanking_len)
     if homo_boundary_end == -1:
         return ltr_name, False, '', ''
 
@@ -1782,6 +2000,456 @@ def judge_boundary_v6(matrix_file, ltr_name):
         if found_TSD:
             tsd_count += 1
     # print(tsd_count)
+    # Generate a consensus sequence.
+    model_seq = ''
+    # if tsd_count > 10:
+    if tsd_count > 10 or float(tsd_count) / row_num >= 0.25:
+        # Record the base composition of each column.
+        col_base_map = {}
+        for col_index in range(col_num):
+            if not col_base_map.__contains__(col_index):
+                col_base_map[col_index] = {}
+            base_map = col_base_map[col_index]
+            # Calculate the base composition ratio in the current column.
+            if len(base_map) == 0:
+                for row in range(row_num):
+                    cur_base = matrix[row][col_index]
+                    if not base_map.__contains__(cur_base):
+                        base_map[cur_base] = 0
+                    cur_count = base_map[cur_base]
+                    cur_count += 1
+                    base_map[cur_base] = cur_count
+            if not base_map.__contains__('-'):
+                base_map['-'] = 0
+        for col_index in range(homo_boundary_start, homo_boundary_end + 1):
+            base_map = col_base_map[col_index]
+            # Identify the most frequent base that exceeds the threshold 'valid_col_threshold'.
+            max_base_count = 0
+            max_base = ''
+            for cur_base in base_map.keys():
+                cur_count = base_map[cur_base]
+                if cur_count > max_base_count:
+                    max_base_count = cur_count
+                    max_base = cur_base
+            if max_base_count >= int(row_num / 2):
+                if max_base != '-':
+                    model_seq += max_base
+                else:
+                    continue
+            else:
+                max_base_count = 0
+                max_base = ''
+                for cur_base in base_map.keys():
+                    if cur_base == '-':
+                        continue
+                    cur_count = base_map[cur_base]
+                    if cur_count > max_base_count:
+                        max_base_count = cur_count
+                        max_base = cur_base
+                model_seq += max_base
+
+    if model_seq == '' or len(model_seq) < 80:
+        is_TE = False
+        model_seq = ''
+    else:
+        is_TE = True
+
+    if debug:
+        print(matrix_file, is_TE, homo_boundary_start, homo_boundary_end)
+    return ltr_name, is_TE, '', model_seq
+
+
+def judge_boundary_v7(matrix_file, ltr_name, TE_type, flanking_len):
+    align_names, align_contigs = read_matrix_file(matrix_file)
+
+    debug = 0
+    col_num = -1
+    row_num = 0
+    lines = []
+    no_empty_row = 0
+    with open(matrix_file, 'r') as f_r:
+        for line in f_r:
+            line = line.replace('\n', '').split('\t')[0]
+            col_num = len(line)
+            row_num += 1
+            lines.append(line)
+            if line != '-' * col_num:
+                no_empty_row += 1
+
+    # 过滤掉单拷贝的LTR，因为我们没办法判断它是否是LTR
+    if row_num <= 1:
+        return ltr_name, False, '', ''
+
+    matrix = [[''] * col_num for i in range(row_num)]
+    for row, line in enumerate(lines):
+        for col in range(len(line)):
+            matrix[row][col] = line[col]
+
+    col_base_map = {}
+    for col_index in range(col_num):
+        if not col_base_map.__contains__(col_index):
+            col_base_map[col_index] = {}
+        base_map = col_base_map[col_index]
+        # Calculate the base composition ratio in the current column.
+        if len(base_map) == 0:
+            for row in range(row_num):
+                cur_base = matrix[row][col_index]
+                if not base_map.__contains__(cur_base):
+                    base_map[cur_base] = 0
+                cur_count = base_map[cur_base]
+                cur_count += 1
+                base_map[cur_base] = cur_count
+        if not base_map.__contains__('-'):
+            base_map['-'] = 0
+
+    # Starting from column 'align_start', search for 15 effective columns to the left.
+    # Count the base composition of each column, in the format of {40: {A: 10, T: 5, C: 7, G: 9, '-': 20}},
+    # which indicates the number of different bases in the current column.
+    # Based on this, it is easy to determine whether the current column is effective and whether it is a homologous column.
+    sliding_window_size = 10
+    valid_col_threshold = int(row_num/2)
+
+    if row_num <= 5:
+        homo_threshold = 0.95
+    elif row_num <= 10:
+        homo_threshold = 0.9
+    elif row_num <= 50:
+        homo_threshold = 0.8
+    else:
+        homo_threshold = 0.75
+
+    align_start = flanking_len
+    align_end = col_num - flanking_len
+
+    homo_boundary_start = search_boundary_homo_v3(valid_col_threshold, align_start, matrix, row_num,
+                                             col_num, 'start', homo_threshold, debug, sliding_window_size)
+    if homo_boundary_start == -1:
+        return ltr_name, False, '', ''
+
+    homo_boundary_end = search_boundary_homo_v3(valid_col_threshold, align_end, matrix, row_num,
+                                           col_num, 'end', homo_threshold, debug, sliding_window_size)
+
+    if homo_boundary_end == -1:
+        return ltr_name, False, '', ''
+
+    # Record the base composition of each column.
+    col_base_map = {}
+    for col_index in range(col_num):
+        if not col_base_map.__contains__(col_index):
+            col_base_map[col_index] = {}
+        base_map = col_base_map[col_index]
+        # Calculate the base composition ratio in the current column.
+        if len(base_map) == 0:
+            for row in range(row_num):
+                cur_base = matrix[row][col_index]
+                if not base_map.__contains__(cur_base):
+                    base_map[cur_base] = 0
+                cur_count = base_map[cur_base]
+                cur_count += 1
+                base_map[cur_base] = cur_count
+        if not base_map.__contains__('-'):
+            base_map['-'] = 0
+
+    # Determine the starting base of the homologous boundary.
+    final_boundary_start = -1
+    final_boundary_end = -1
+    final_cons_seq = ''
+    if TE_type == 'tir':
+        TSD_sizes = list(range(2, 12))
+        end_5_window_size = 20
+        end_5_positions = {}
+        end_3_positions = {}
+        # Determine if there are two or more TSDs in the align file based on the boundary.
+        # If yes, it is a genuine boundary.
+        tsd_count = 0
+        for name in align_names:
+            # 1. Verify if there are bases at the boundary.
+            raw_align_seq = align_contigs[name]
+            align_seq = ''
+            gap_to_nogap = {}
+            nogap_to_gap = {}
+            cur_align_index = 0
+            for i, base in enumerate(raw_align_seq):
+                if base == '-':
+                    gap_to_nogap[i] = cur_align_index
+                    continue
+                else:
+                    align_seq += base
+                    nogap_to_gap[cur_align_index] = i
+                    gap_to_nogap[i] = cur_align_index
+                    cur_align_index += 1
+
+            end_5 = gap_to_nogap[homo_boundary_start]
+            end_3 = gap_to_nogap[homo_boundary_end]
+
+            found_TSD = False
+            # After locating the 3' end, attempt to search for a set of TSDs in the side wing (8-20) lengths.
+            # Search for the corresponding length of TSD near the 5' end (30 bp), and once found, confirm the final 5' end.
+            if end_3 != -1 and end_5 != -1:
+                # Obtain all possible TSDs on the side wing of the 3' end.
+                # 允许 max_offset = 5
+                max_offset = 5
+                TSD_list = []
+                subsequence = align_seq[end_3 - max_offset: end_3 + end_5_window_size]
+                for k in reversed(TSD_sizes):
+                    for i in range(0, len(subsequence) - k + 1):
+                        kmer = subsequence[i:i + k]
+                        cur_end_3 = end_3 - max_offset + i
+                        TSD_list.append((k, kmer, cur_end_3))
+
+                all_valid_tsds = []
+                # Search for TSDs of various lengths near the 5' end (30 bp) (when TSD len >=8, allow 1bp mismatch).
+                subsequence = align_seq[end_5 - end_5_window_size: end_5 + max_offset]
+                for k, TSD, cur_end_3 in TSD_list:
+                    for i in range(0, len(subsequence) - k + 1):
+                        kmer = subsequence[i:i + k]
+                        if k >= 8:
+                            dist = 1
+                        else:
+                            dist = 0
+                        if k == len(TSD) and k == len(kmer):
+                            # first_matches = find_near_matches(TSD, kmer, max_l_dist=dist)
+                            # if len(first_matches) > 0:
+                            if allow_mismatch(TSD, kmer, allow_mismatch_num=dist):
+                                cur_end_5 = end_5 - end_5_window_size + i + k
+                                distance = abs(cur_end_5-end_5) + abs(cur_end_3-end_3)
+                                all_valid_tsds.append((cur_end_5, cur_end_3, distance, k, kmer, TSD))
+                if len(all_valid_tsds) > 0:
+                    cur_end_5, cur_end_3, distance, k, left_tsd, right_tsd = sorted(all_valid_tsds, key=lambda x: x[2])[0]
+
+                    gap_end_5 = nogap_to_gap[cur_end_5]
+                    if gap_end_5 not in end_5_positions:
+                        end_5_positions[gap_end_5] = 0
+                    cur_count = end_5_positions[gap_end_5]
+                    end_5_positions[gap_end_5] = cur_count + 1
+
+                    gap_end_3 = nogap_to_gap[cur_end_3]
+                    if gap_end_3 not in end_3_positions:
+                        end_3_positions[gap_end_3] = 0
+                    cur_count = end_3_positions[gap_end_3]
+                    end_3_positions[gap_end_3] = cur_count + 1
+
+                    tsd_count += 1
+        # 取出现次数最多的end_5当作最后的end_5
+        homo_boundary_start = sorted(end_5_positions.items(), key=lambda item: item[1], reverse=True)[0][0]
+        homo_boundary_end = sorted(end_3_positions.items(), key=lambda item: item[1], reverse=True)[0][0]
+
+        # Generate a consensus sequence.
+        model_seq = ''
+        # TSD的数量超过拷贝数的 1/4，认为是TIR转座子
+        # if tsd_count > 10:
+        if tsd_count > 10 or float(tsd_count) / row_num >= 0.25:
+            for col_index in range(homo_boundary_start, homo_boundary_end + 1):
+                base_map = col_base_map[col_index]
+                # Identify the most frequent base that exceeds the threshold 'valid_col_threshold'.
+                max_base_count = 0
+                max_base = ''
+                for cur_base in base_map.keys():
+                    cur_count = base_map[cur_base]
+                    if cur_count > max_base_count:
+                        max_base_count = cur_count
+                        max_base = cur_base
+                if max_base_count >= int(row_num / 2):
+                    if max_base != '-':
+                        model_seq += max_base
+                    else:
+                        continue
+                else:
+                    max_base_count = 0
+                    max_base = ''
+                    for cur_base in base_map.keys():
+                        if cur_base == '-':
+                            continue
+                        cur_count = base_map[cur_base]
+                        if cur_count > max_base_count:
+                            max_base_count = cur_count
+                            max_base = cur_base
+                    model_seq += max_base
+        final_cons_seq = model_seq
+    elif TE_type == 'helitron':
+        # 我们对识别到的同源边界两侧扩展 10 bp，然后生成的一致性序列 model_seq
+        # Generate a consensus sequence.
+        extend_len = 10
+        model_seq = ''
+        if homo_boundary_start - extend_len >= 0 and homo_boundary_end + 1 + extend_len <= col_num:
+            for col_index in range(homo_boundary_start - extend_len, homo_boundary_end + 1 + extend_len):
+                base_map = col_base_map[col_index]
+                # Identify the most frequent base that exceeds the threshold 'valid_col_threshold'.
+                max_base_count = 0
+                max_base = ''
+                for cur_base in base_map.keys():
+                    cur_count = base_map[cur_base]
+                    if cur_count > max_base_count:
+                        max_base_count = cur_count
+                        max_base = cur_base
+                if max_base_count >= int(row_num / 2):
+                    if max_base != '-':
+                        model_seq += max_base
+                    else:
+                        continue
+                else:
+                    max_base_count = 0
+                    max_base = ''
+                    for cur_base in base_map.keys():
+                        if cur_base == '-':
+                            continue
+                        cur_count = base_map[cur_base]
+                        if cur_count > max_base_count:
+                            max_base_count = cur_count
+                            max_base = cur_base
+                    model_seq += max_base
+        final_cons_seq = model_seq
+
+    if final_cons_seq == '':
+        is_TE = False
+    else:
+        is_TE = True
+
+    if debug:
+        print(matrix_file, is_TE, final_boundary_start, final_boundary_end)
+    return ltr_name, is_TE, '', final_cons_seq
+
+def judge_boundary_v8(matrix_file, ltr_name, flanking_len):
+    align_names, align_contigs = read_matrix_file(matrix_file)
+
+    debug = 0
+    col_num = -1
+    row_num = 0
+    lines = []
+    no_empty_row = 0
+    with open(matrix_file, 'r') as f_r:
+        for line in f_r:
+            line = line.replace('\n', '').split('\t')[0]
+            col_num = len(line)
+            row_num += 1
+            lines.append(line)
+            if line != '-' * col_num:
+                no_empty_row += 1
+
+    # 过滤掉单拷贝的LTR，因为我们没办法判断它是否是LTR
+    if row_num <= 1:
+        return ltr_name, False, '', ''
+
+    matrix = [[''] * col_num for i in range(row_num)]
+    for row, line in enumerate(lines):
+        for col in range(len(line)):
+            matrix[row][col] = line[col]
+
+    col_base_map = {}
+    for col_index in range(col_num):
+        if not col_base_map.__contains__(col_index):
+            col_base_map[col_index] = {}
+        base_map = col_base_map[col_index]
+        # Calculate the base composition ratio in the current column.
+        if len(base_map) == 0:
+            for row in range(row_num):
+                cur_base = matrix[row][col_index]
+                if not base_map.__contains__(cur_base):
+                    base_map[cur_base] = 0
+                cur_count = base_map[cur_base]
+                cur_count += 1
+                base_map[cur_base] = cur_count
+        if not base_map.__contains__('-'):
+            base_map['-'] = 0
+
+    # Starting from column 'align_start', search for 15 effective columns to the left.
+    # Count the base composition of each column, in the format of {40: {A: 10, T: 5, C: 7, G: 9, '-': 20}},
+    # which indicates the number of different bases in the current column.
+    # Based on this, it is easy to determine whether the current column is effective and whether it is a homologous column.
+    sliding_window_size = 10
+    valid_col_threshold = int(row_num/2)
+
+    if row_num <= 5:
+        homo_threshold = 0.95
+    elif row_num <= 10:
+        homo_threshold = 0.9
+    elif row_num <= 50:
+        homo_threshold = 0.8
+    else:
+        homo_threshold = 0.75
+
+    align_start = flanking_len
+    align_end = col_num - flanking_len
+
+    homo_boundary_start = search_boundary_homo_v3(valid_col_threshold, align_start, matrix, row_num,
+                                             col_num, 'start', homo_threshold, debug, sliding_window_size)
+    if homo_boundary_start == -1:
+        return ltr_name, False, '', ''
+
+    homo_boundary_end = search_boundary_homo_v3(valid_col_threshold, align_end, matrix, row_num,
+                                           col_num, 'end', homo_threshold, debug, sliding_window_size)
+    if homo_boundary_end == -1:
+        return ltr_name, False, '', ''
+
+
+    # Iterate through each copy in the multiple sequence alignment, take 15-bp of bases with no gaps above
+    # and below the homologous boundary, search for polyA/T within the window, locate the position of polyA/T,
+    # and then search for TSDs of 8-bp or more in the upstream 30-bp of the other homologous boundary.
+
+    # 迭代每个拷贝，从尾部搜索第一个polyA/polyT, 提取right TSD
+    TSD_sizes = list(range(8, 21))
+    end_5_window_size = 20
+    cur_boundary_start = homo_boundary_start
+    tsd_count = 0
+    end_5_positions = {}
+    for name in align_names:
+        raw_align_seq = align_contigs[name]
+        align_seq = ''
+        gap_to_nogap = {}
+        nogap_to_gap = {}
+        cur_align_index = 0
+        for i, base in enumerate(raw_align_seq):
+            if base == '-':
+                gap_to_nogap[i] = cur_align_index
+                continue
+            else:
+                align_seq += base
+                nogap_to_gap[cur_align_index] = i
+                gap_to_nogap[i] = cur_align_index
+                cur_align_index += 1
+
+        homology_end_3 = gap_to_nogap[homo_boundary_end]
+        end_5 = gap_to_nogap[cur_boundary_start]
+        end_3, polyA_seq = find_tail_polyA(align_seq)
+        # polyA的边界不能与同源边界相差太多
+        if end_3 == -1 or abs(end_3 - homology_end_3) > 10:
+            end_3, polyT_seq = find_tail_polyT(align_seq)
+        if end_3 == -1 or abs(end_3 - homology_end_3) > 10:
+            end_3 = homology_end_3
+
+        found_TSD = False
+        # After locating the 3' end, attempt to search for a set of TSDs in the side wing (8-20) lengths.
+        # Search for the corresponding length of TSD near the 5' end (30 bp), and once found, confirm the final 5' end.
+        if end_3 != -1 and end_5 != -1:
+            # Obtain all possible TSDs on the side wing of the 3' end.
+            # 允许 max_offset = 5
+            TSD_list = [(k, align_seq[end_3: end_3 + k]) for k in reversed(TSD_sizes)]
+
+            # Search for TSDs of various lengths near the 5' end (30 bp) (when TSD len >=8, allow 1bp mismatch).
+            max_offset = 5
+            subsequence = align_seq[end_5 - end_5_window_size: end_5 + max_offset]
+            for k, TSD in TSD_list:
+                for i in range(0, len(subsequence) - k + 1):
+                    kmer = subsequence[i:i + k]
+                    dist = 1
+                    if k == len(TSD) and k == len(kmer):
+                        first_matches = find_near_matches(TSD, kmer, max_l_dist=dist)
+                        if len(first_matches) > 0:
+                            end_5 = end_5 - end_5_window_size + i + k
+                            gap_end_5 = nogap_to_gap[end_5]
+                            if gap_end_5 not in end_5_positions:
+                                end_5_positions[gap_end_5] = 0
+                            cur_count = end_5_positions[gap_end_5]
+                            end_5_positions[gap_end_5] = cur_count + 1
+                            found_TSD = True
+                            break
+                if found_TSD:
+                    break
+        if found_TSD:
+            tsd_count += 1
+    # 取出现次数最多的end_5当作最后的end_5
+    homo_boundary_start = sorted(end_5_positions.items(), key=lambda item: item[1], reverse=True)[0][0]
+
     # Generate a consensus sequence.
     model_seq = ''
     # if tsd_count > 10:
@@ -2329,7 +2997,7 @@ def judge_boundary_v11(cur_seq, align_file, debug, TE_type, plant, result_type):
     return is_TE
 
 def search_boundary_homo_v3(valid_col_threshold, pos, matrix, row_num, col_num,
-                            type, homo_threshold, debug, sliding_window_size):
+                            type, homo_threshold, debug, sliding_window_size, flanking_len):
     # We need a program that takes an alignment file 'align_file' and boundary positions 'start_pos' and 'end_pos' as inputs, and extracts effective 20 columns around the boundaries. It also checks if these 20 columns exhibit homology.
     # Key Definitions:
     # ① What is an effective column? A column that has at least half of the total copy count, i.e., at least total/2 non-empty bases.
@@ -2357,7 +3025,7 @@ def search_boundary_homo_v3(valid_col_threshold, pos, matrix, row_num, col_num,
         if not base_map.__contains__('-'):
             base_map['-'] = 0
 
-    search_len = 100
+    search_len = flanking_len
     if type == 'start':
         valid_col_count = 0
         homo_col_count = 0
@@ -3269,7 +3937,7 @@ def get_overlap_len(seq1, seq2):
 def merge_overlap_seq(seq1, seq2):
     return (min(seq1[0], seq2[0]), max(seq1[1], seq2[1]))
 
-def multi_process_align_v1(query_path, subject_path, blastnResults_path, tmp_blast_dir, threads, chrom_length, coverage_threshold, category, is_removed_dir=True):
+def multi_process_align_v1(query_path, subject_path, blastnResults_path, tmp_blast_dir, threads, chrom_length, coverage_threshold, category, is_full_length, is_removed_dir=True):
     tools_dir = ''
     if is_removed_dir:
         os.system('rm -rf ' + tmp_blast_dir)
@@ -3338,7 +4006,7 @@ def multi_process_align_v1(query_path, subject_path, blastnResults_path, tmp_bla
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for file in longest_repeat_files:
-        job = ex.submit(multiple_alignment_blast_v1, file, tools_dir, coverage_threshold, category, chrom_length)
+        job = ex.submit(multiple_alignment_blast_v1, file, tools_dir, coverage_threshold, category, chrom_length, is_full_length)
         jobs.append(job)
     ex.shutdown(wait=True)
 
@@ -3379,6 +4047,7 @@ def multi_process_align_v1(query_path, subject_path, blastnResults_path, tmp_bla
                     start = cur_frag[0]
                     end = cur_frag[1]
                     seq_name = cur_frag[2]
+                    coverage = cur_frag[3]
                     seg_index = map_fragment(start, end, segment_len)
 
                     prev_segment_frags = prev_chr_segment_list[seg_index]
@@ -3391,7 +4060,7 @@ def multi_process_align_v1(query_path, subject_path, blastnResults_path, tmp_bla
                             is_found = True
                             break
                     if not is_found:
-                        prev_segment_frags.append([start, end, seq_name])
+                        prev_segment_frags.append([start, end, seq_name, coverage])
 
     with open(blastnResults_path, 'w') as f_save:
         for chr_name in prev_chr_segments.keys():
@@ -3399,7 +4068,7 @@ def multi_process_align_v1(query_path, subject_path, blastnResults_path, tmp_bla
             for seg_index in cur_chr_segments.keys():
                 segment_frags = cur_chr_segments[seg_index]
                 for frag in segment_frags:
-                    new_line = frag[2] + '\t' + chr_name + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + str(frag[0]) + '\t' + str(frag[1]) + '\t' + '-1' + '\t' + '-1' + '\n'
+                    new_line = frag[2] + '\t' + chr_name + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + '-1' + '\t' + str(frag[0]) + '\t' + str(frag[1]) + '\t' + str(frag[3]) + '\t' + '-1' + '\n'
                     f_save.write(new_line)
 
     if is_removed_dir:
@@ -3928,7 +4597,7 @@ def divided_array(original_array, partitions):
             read_from_start = bool(1 - read_from_start)
     return final_partitions
 
-def multiple_alignment_blast_v1(repeats_path, tools_dir, coverage_threshold, category, chrom_length):
+def multiple_alignment_blast_v1(repeats_path, tools_dir, coverage_threshold, category, chrom_length, is_full_length):
     split_repeats_path = repeats_path[0]
     target_files = repeats_path[1]
     blastn2Results_path = repeats_path[2]
@@ -3943,7 +4612,7 @@ def multiple_alignment_blast_v1(repeats_path, tools_dir, coverage_threshold, cat
 
     # invoke the function to retrieve the full-length copies.
     lines = generate_full_length_out(blastn2Results_path, full_length_out, split_repeats_path, genome_path, tmp_dir, tools_dir,
-                             coverage_threshold, category)
+                             coverage_threshold, category, is_full_length)
 
     # 去除冗余的影响
     lines = list(lines)
@@ -3954,10 +4623,11 @@ def multiple_alignment_blast_v1(repeats_path, tools_dir, coverage_threshold, cat
         chr_name = line[1]
         chr_start = line[2]
         chr_end = line[3]
+        coverage = line[4]
         if chr_name not in test_fragments:
             test_fragments[chr_name] = []
         fragments = test_fragments[chr_name]
-        fragments.append((chr_start, chr_end, seq_name))
+        fragments.append((chr_start, chr_end, seq_name, coverage))
 
     # 由于可能会有多个序列比对到同一个位置，因此我们对于基因组上的某一个位置，我们只取一条比对
     segment_len = 100000  # 100K
@@ -3987,6 +4657,7 @@ def multiple_alignment_blast_v1(repeats_path, tools_dir, coverage_threshold, cat
             start = cur_frag[0]
             end = cur_frag[1]
             seq_name = cur_frag[2]
+            coverage = cur_frag[3]
             seg_index = map_fragment(start, end, segment_len)
             segment_frags = cur_chr_segments[seg_index]
             # Check if there is an overlap of over 95% between the fragment in the segment and the test fragment.
@@ -3998,7 +4669,7 @@ def multiple_alignment_blast_v1(repeats_path, tools_dir, coverage_threshold, cat
                     is_found = True
                     break
             if not is_found:
-                segment_frags.append([start, end, seq_name])
+                segment_frags.append([start, end, seq_name, coverage])
 
     return chr_segments
 
@@ -4022,7 +4693,7 @@ def multiple_alignment_blast_v3(repeats_path, tools_dir, coverage_threshold):
 
     return full_length_annotations
 
-def generate_full_length_out(BlastnOut, full_length_out, TE_lib, reference, tmp_output_dir, tools_dir, full_length_threshold, category):
+def generate_full_length_out(BlastnOut, full_length_out, TE_lib, reference, tmp_output_dir, tools_dir, full_length_threshold, category, is_full_length):
     if not os.path.exists(tmp_output_dir):
         os.makedirs(tmp_output_dir)
     filter_tmp_out = filter_out_by_category(BlastnOut, tmp_output_dir, category)
@@ -4030,25 +4701,32 @@ def generate_full_length_out(BlastnOut, full_length_out, TE_lib, reference, tmp_
     threads = 1
     divergence_threshold = 20
     search_struct = False
-    full_length_annotations, copies_direct = get_full_length_copies_from_blastn(TE_lib, reference, filter_tmp_out,
+    full_length_annotations, copies_direct, all_query_copies = get_full_length_copies_from_blastn(TE_lib, reference, filter_tmp_out,
                                                                              tmp_output_dir, threads,
                                                                              divergence_threshold,
                                                                              full_length_threshold,
                                                                              search_struct, tools_dir)
-
     lines = set()
-    for query_name in full_length_annotations.keys():
-        query_name = str(query_name)
-        for copy_annotation in full_length_annotations[query_name]:
-            chr_pos = copy_annotation[0]
-            annotation = copy_annotation[1]
-            parts = chr_pos.split(':')
-            chr_name = parts[0]
-            chr_pos_parts = parts[1].split('-')
-            chr_start = int(chr_pos_parts[0]) + 1
-            chr_end = int(chr_pos_parts[1])
-            new_line = (query_name, chr_name, chr_start, chr_end)
-            lines.add(new_line)
+    if not is_full_length:
+        for query_name in all_query_copies.keys():
+            query_copies = all_query_copies[query_name]
+            for subject_pos in query_copies.keys():
+                chr_name, chr_start, chr_end, coverage = query_copies[subject_pos]
+                new_line = (query_name, chr_name, chr_start, chr_end, coverage)
+                lines.add(new_line)
+    else:
+        for query_name in full_length_annotations.keys():
+            query_name = str(query_name)
+            for copy_annotation in full_length_annotations[query_name]:
+                chr_pos = copy_annotation[0]
+                annotation = copy_annotation[1]
+                parts = chr_pos.split(':')
+                chr_name = parts[0]
+                chr_pos_parts = parts[1].split('-')
+                chr_start = int(chr_pos_parts[0]) + 1
+                chr_end = int(chr_pos_parts[1])
+                new_line = (query_name, chr_name, chr_start, chr_end, -1)
+                lines.add(new_line)
 
     return lines
 
@@ -4118,6 +4796,7 @@ def get_full_length_copies_from_blastn(TE_lib, reference, blastn_out, tmp_output
             subject_pos = subject_dict[subject_name]
             subject_pos.append((q_start, q_end, s_start, s_end))
 
+    all_query_copies = {}
     full_length_copies = {}
     flank_full_length_copies = {}
     copies_direct = {}
@@ -4126,7 +4805,7 @@ def get_full_length_copies_from_blastn(TE_lib, reference, blastn_out, tmp_output
         if query_name not in query_contigs:
             continue
         query_len = len(query_contigs[query_name])
-        skip_gap = query_len * (1 - full_length_threshold)
+        skip_gap = query_len * (1 - 0.95)
 
         if str(query_name).__contains__('Helitron'):
             flanking_len = 5
@@ -4287,13 +4966,11 @@ def get_full_length_copies_from_blastn(TE_lib, reference, blastn_out, tmp_output
 
         # To determine whether each copy has a coverage exceeding the full_length_threshold with respect
         # to the consensus sequence, retaining full-length copies.
+        full_length_query_copies = {}
+        full_length_flank_query_copies = {}
         query_copies = {}
-        flank_query_copies = {}
         orig_query_len = len(query_contigs[query_name])
-        # query_copies[query_name] = query_contigs[query_name]
         for repeat in longest_queries:
-            if repeat[2] < full_length_threshold * query_len:
-                continue
             # Subject
             subject_name = repeat[6]
             subject_chr_start = 0
@@ -4318,10 +4995,12 @@ def get_full_length_copies_from_blastn(TE_lib, reference, blastn_out, tmp_output
             cur_query_len = repeat[2]
             coverage = float(cur_query_len) / orig_query_len
             if coverage >= full_length_threshold:
-                query_copies[subject_pos] = subject_seq
-                flank_query_copies[subject_pos] = flank_subject_seq
-        full_length_copies[query_name] = query_copies
-        flank_full_length_copies[query_name] = flank_query_copies
+                full_length_query_copies[subject_pos] = subject_seq
+                full_length_flank_query_copies[subject_pos] = flank_subject_seq
+            query_copies[subject_pos] = (subject_name, subject_start_pos, subject_end_pos, coverage)
+        full_length_copies[query_name] = full_length_query_copies
+        flank_full_length_copies[query_name] = full_length_flank_query_copies
+        all_query_copies[query_name] = query_copies
 
     # The candidate full-length copies and the consensus are then clustered using cd-hit-est,
     # retaining copies that belong to the same cluster as the consensus.
@@ -4331,11 +5010,9 @@ def get_full_length_copies_from_blastn(TE_lib, reference, blastn_out, tmp_output
     if not os.path.exists(cluster_dir):
         os.makedirs(cluster_dir)
 
-    all_query_copies = {}
     for query_name in full_length_copies.keys():
         query_copies = full_length_copies[query_name]
         flank_query_copies = flank_full_length_copies[query_name]
-        all_query_copies.update(query_copies)
         fc_path = cluster_dir + '/' + query_name + '.fa'
         store_fasta(query_copies, fc_path)
         split_files.append((fc_path, query_name, query_copies, flank_query_copies))
@@ -4356,7 +5033,7 @@ def get_full_length_copies_from_blastn(TE_lib, reference, blastn_out, tmp_output
     for job in as_completed(jobs):
         annotations = job.result()
         full_length_annotations.update(annotations)
-    return full_length_annotations, copies_direct
+    return full_length_annotations, copies_direct, all_query_copies
 
 def get_full_length_copies_from_blastn_v3(TE_lib, reference, blastn_out, tmp_output_dir, threads, divergence_threshold,
                                     full_length_threshold, search_struct, tools_dir):
@@ -5035,8 +5712,11 @@ def filter_single_ltr(output_path, intact_output_path, leftLtr2Candidates, ltr_l
     judge_ltr_from_both_ends_frame_for_intactLTR(output_dir, intact_output_path, threads, type, log, sliding_window_size=sliding_window_size)
 
 
-def filter_single_copy_ltr(output_path, is_ltr_has_structure, single_copy_internals_file, ltr_copies, internal_ltrs, protein_db, tmp_output_dir, threads, log):
-    # 我们只保留具有 TSD + TG...CA 结构的单拷贝 或者 内部具有完整protein的。
+def filter_single_copy_ltr(output_path, single_copy_internals_file, ltr_copies, internal_ltrs,
+                           ltr_protein_db, other_protein_db, tmp_output_dir, threads,
+                           reference, leftLtr2Candidates, ltr_lines, log):
+    # # 我们只保留具有 TSD + TG...CA 结构的单拷贝 或者 内部具有完整protein的。
+    # 我们只保留内部具有完整或 >=100 bp protein
 
     # 判断单拷贝的内部序列是否有完整的蛋白质
     single_copy_internals = {}
@@ -5045,12 +5725,11 @@ def filter_single_copy_ltr(output_path, is_ltr_has_structure, single_copy_intern
             single_copy_internals[name] = internal_ltrs[name]
     store_fasta(single_copy_internals, single_copy_internals_file)
 
-    output_table = single_copy_internals_file + '.domain'
-    temp_dir = tmp_output_dir + '/domain'
-    get_domain_info(single_copy_internals_file, protein_db, output_table, threads, temp_dir)
-
+    temp_dir = tmp_output_dir + '/ltr_domain'
+    output_table = single_copy_internals_file + '.ltr_domain'
+    get_domain_info(single_copy_internals_file, ltr_protein_db, output_table, threads, temp_dir)
     is_single_ltr_has_intact_protein = {}
-    protein_names, protein_contigs = read_fasta(protein_db)
+    protein_names, protein_contigs = read_fasta(ltr_protein_db)
     with open(output_table, 'r') as f_r:
         for i, line in enumerate(f_r):
             if i < 2:
@@ -5064,6 +5743,43 @@ def filter_single_copy_ltr(output_path, is_ltr_has_structure, single_copy_intern
             if float(abs(protein_end - protein_start)) / intact_protein_len >= 0.95:
                 is_single_ltr_has_intact_protein[te_name] = True
 
+    temp_dir = tmp_output_dir + '/other_domain'
+    output_table = single_copy_internals_file + '.other_domain'
+    get_domain_info(single_copy_internals_file, other_protein_db, output_table, threads, temp_dir)
+    is_single_ltr_has_intact_other_protein = {}
+    protein_names, protein_contigs = read_fasta(other_protein_db)
+    with open(output_table, 'r') as f_r:
+        for i, line in enumerate(f_r):
+            if i < 2:
+                continue
+            parts = line.split('\t')
+            te_name = parts[0]
+            protein_name = parts[1]
+            protein_start = int(parts[4])
+            protein_end = int(parts[5])
+            intact_protein_len = len(protein_contigs[protein_name])
+            if float(abs(protein_end - protein_start)) / intact_protein_len >= 0.95:
+                is_single_ltr_has_intact_other_protein[te_name] = True
+
+    # query_protein_types = get_domain_info_v2(single_copy_internals_file, protein_db, threads, temp_dir, tool_dir)
+
+    # 判断单拷贝LTR是否有TSD结构
+    is_single_ltr_has_structure = {}
+    no_structure_single_count = 0
+    ref_names, ref_contigs = read_fasta(reference)
+    for ltr_name in single_copy_internals.keys():
+        candidate_index = leftLtr2Candidates[ltr_name]
+        line = ltr_lines[candidate_index]
+        parts = line.split(' ')
+        chr_name = parts[11]
+        ref_seq = ref_contigs[chr_name]
+        ltr_name, has_structure = is_ltr_has_structure(ltr_name, line, ref_seq)
+        is_single_ltr_has_structure[ltr_name] = has_structure
+        if not has_structure:
+            no_structure_single_count += 1
+    if log is not None:
+        log.logger.info('Filter the number of no structure single copy LTR: ' + str(no_structure_single_count) + ', remaining single copy LTR num: ' + str(len(single_copy_internals)-no_structure_single_count))
+
     remain_intact_count = 0
     filtered_intact_count = 0
     with open(output_path, 'w') as f_save:
@@ -5072,13 +5788,32 @@ def filter_single_copy_ltr(output_path, is_ltr_has_structure, single_copy_intern
                 cur_is_ltr = 1
                 remain_intact_count += 1
             else:
-                # 单拷贝如果有结构 或者 有全长的protein，我们认为是真的LTR，否则为假阳性
-                if is_ltr_has_structure[name] or (name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name]):
-                    cur_is_ltr = 1
-                    remain_intact_count += 1
-                else:
+                if name in is_single_ltr_has_intact_other_protein and is_single_ltr_has_intact_other_protein[name]:
                     cur_is_ltr = 0
                     filtered_intact_count += 1
+                else:
+                    if name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name] \
+                            and name in is_single_ltr_has_structure and is_single_ltr_has_structure[name]:
+                        cur_is_ltr = 1
+                        remain_intact_count += 1
+                    else:
+                        cur_is_ltr = 0
+                        filtered_intact_count += 1
+
+                # # 如果单拷贝LTR的内部序列有蛋白质、且蛋白质类型单一就认为是真实的LTR
+                # # if name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name]:
+                # if name in query_protein_types:
+                #     protein_types = query_protein_types[name]
+                #     first_protein = next(iter(protein_types))
+                #     if len(protein_types) == 1 and 'LTR' in first_protein:
+                #         cur_is_ltr = 1
+                #         remain_intact_count += 1
+                #     else:
+                #         cur_is_ltr = 0
+                #         filtered_intact_count += 1
+                # else:
+                #     cur_is_ltr = 0
+                #     filtered_intact_count += 1
             f_save.write(name + '\t' + str(cur_is_ltr) + '\n')
     if log is not None:
         log.logger.info('Filter the number of non-intact LTR: ' + str(filtered_intact_count) + ', remaining LTR num: ' + str(remain_intact_count))
@@ -5102,10 +5837,10 @@ def filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference
             line = ltr_lines[candidate_index]
             confident_lines.append((name, line))
 
-    # 获取每条序列的LTR终端是否在边界处具有 TSD + TG...CA motiff
-    is_ltr_has_structure = {}
-    left_size = 8
-    internal_size = 3
+    # # 获取每条序列的LTR终端是否在边界处具有 TSD + TG...CA motiff
+    # is_ltr_has_structure = {}
+    # left_size = 8
+    # internal_size = 3
 
     internal_ltrs = {}
     intact_ltrs = {}
@@ -5121,38 +5856,38 @@ def filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference
 
         ref_seq = ref_contigs[chr_name]
 
-        # 取左/右侧 8bp + 3bp
-        # 计算左LTR的切片索引，并确保它们在范围内
-        left_start = max(left_ltr_start - 1 - left_size, 0)
-        left_end = min(left_ltr_start + internal_size - 1, len(ref_seq))
-        left_seq = ref_seq[left_start: left_end]
+        # # 取左/右侧 8bp + 3bp
+        # # 计算左LTR的切片索引，并确保它们在范围内
+        # left_start = max(left_ltr_start - 1 - left_size, 0)
+        # left_end = min(left_ltr_start + internal_size - 1, len(ref_seq))
+        # left_seq = ref_seq[left_start: left_end]
+        #
+        # # 计算右LTR的切片索引，并确保它们在范围内
+        # right_start = max(right_ltr_end - internal_size, 0)
+        # right_end = min(right_ltr_end + left_size, len(ref_seq))
+        # right_seq = ref_seq[right_start: right_end]
 
-        # 计算右LTR的切片索引，并确保它们在范围内
-        right_start = max(right_ltr_end - internal_size, 0)
-        right_end = min(right_ltr_end + left_size, len(ref_seq))
-        right_seq = ref_seq[right_start: right_end]
-
-        has_structure = False
-        tsd_lens = [6, 5, 4]
-        exist_tsd = set()
-        tsd_motif_distance = 2
-        for k_num in tsd_lens:
-            for i in range(len(left_seq) - k_num + 1):
-                left_kmer = left_seq[i: i + k_num]
-                tsd_right_seq = left_seq[i + k_num: i + k_num + tsd_motif_distance]
-                if 'N' not in left_kmer and 'TG' in tsd_right_seq:
-                    exist_tsd.add(left_kmer)
-        for k_num in tsd_lens:
-            if has_structure:
-                break
-            for i in range(len(right_seq) - k_num + 1):
-                right_kmer = right_seq[i: i + k_num]
-                start_pos = max(i - tsd_motif_distance, 0)
-                tsd_left_seq = right_seq[start_pos: i]
-                if 'N' not in right_kmer and right_kmer in exist_tsd and 'CA' in tsd_left_seq:
-                    has_structure = True
-                    break
-        is_ltr_has_structure[name] = has_structure
+        # has_structure = False
+        # tsd_lens = [6, 5, 4]
+        # exist_tsd = set()
+        # tsd_motif_distance = 2
+        # for k_num in tsd_lens:
+        #     for i in range(len(left_seq) - k_num + 1):
+        #         left_kmer = left_seq[i: i + k_num]
+        #         tsd_right_seq = left_seq[i + k_num: i + k_num + tsd_motif_distance]
+        #         if 'N' not in left_kmer and 'TG' in tsd_right_seq:
+        #             exist_tsd.add(left_kmer)
+        # for k_num in tsd_lens:
+        #     if has_structure:
+        #         break
+        #     for i in range(len(right_seq) - k_num + 1):
+        #         right_kmer = right_seq[i: i + k_num]
+        #         start_pos = max(i - tsd_motif_distance, 0)
+        #         tsd_left_seq = right_seq[start_pos: i]
+        #         if 'N' not in right_kmer and right_kmer in exist_tsd and 'CA' in tsd_left_seq:
+        #             has_structure = True
+        #             break
+        # is_ltr_has_structure[name] = has_structure
 
         intact_ltr_seq = ref_seq[left_ltr_start-1: right_ltr_end]
         internal_ltr_seq = ref_seq[left_ltr_end: right_ltr_start - 1]
@@ -5165,11 +5900,82 @@ def filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference
     temp_dir = tmp_output_dir + '/intact_ltr_filter'
     ltr_copies = filter_ltr_by_copy_num_sub(intact_ltr_path, threads, temp_dir, split_ref_dir, full_length_threshold, internal_ltrs, log)
 
-    # 由于比对的问题，获取的拷贝并不总是带终端的，因此实际上不算全长拷贝。考虑到intact LTR 总是带终端的，它的拷贝应该也能被原始的程序识别到。
+    # 由于比对的问题，获取的拷贝并不总是带终端的，因此实际上不算全长拷贝。
     # 因此我们获取拷贝之后再和原始结果计算overlap，如果overlap超过 95% 才算一个真的全长拷贝，否则不算。
+    # 经常会出现获取了两个拷贝，但是实际上都是同一个拷贝(坐标overlap或者来自冗余contig)，因此我们要对拷贝去冗余
     intact_ltr_copies = get_intact_ltr_copies(ltr_copies, ltr_lines, full_length_threshold, reference)
 
-    return is_ltr_has_structure, intact_ltr_copies, internal_ltrs
+    # 过滤来自冗余contig的拷贝，即取拷贝的左侧100bp+右侧100bp组成的序列仍然能够很好比对
+    temp_dir = tmp_output_dir + '/intact_ltr_deredundant'
+    intact_ltr_copies = remove_copies_from_redundant_contig(intact_ltr_copies, reference, temp_dir, threads)
+
+    return intact_ltr_copies, internal_ltrs
+
+def remove_copies_from_redundant_contig(intact_ltr_copies, reference, temp_dir, threads, flanking_len=100):
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+    ref_names, ref_contigs = read_fasta(reference)
+
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for ltr_name in intact_ltr_copies.keys():
+        cur_copy_path = temp_dir + '/' + ltr_name + '.copies'
+        copies = intact_ltr_copies[ltr_name]
+        cur_copy_contigs = {}
+        copy_name_2_copy_dict = {}
+        for cur_copy in copies:
+            # 将所有拷贝都存成文件，然后
+            cur_copy_name = str(cur_copy[0]) + '-' + str(cur_copy[1]) + '-' + str(cur_copy[2])
+            ref_seq = ref_contigs[cur_copy[0]]
+            cur_copy_flank_seq = ref_seq[cur_copy[1] - flanking_len: cur_copy[1]] + ref_seq[cur_copy[2]: cur_copy[2] + flanking_len]
+            cur_copy_contigs[cur_copy_name] = cur_copy_flank_seq
+            copy_name_2_copy_dict[cur_copy_name] = cur_copy
+        store_fasta(cur_copy_contigs, cur_copy_path)
+
+        job = ex.submit(get_non_redundant_copies, ltr_name, cur_copy_contigs, cur_copy_path, copy_name_2_copy_dict)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    intact_ltr_copies = {}
+    for job in as_completed(jobs):
+        ltr_name, cur_intact_ltr_copies = job.result()
+        intact_ltr_copies[ltr_name] = cur_intact_ltr_copies
+    return intact_ltr_copies
+
+def get_non_redundant_copies(ltr_name, cur_copy_contigs, cur_copy_path, copy_name_2_copy_dict):
+    blastn_command = 'blastn -query ' + cur_copy_path + ' -subject ' + cur_copy_path + ' -num_threads ' + str(1) + ' -outfmt 6 '
+    result = subprocess.run(blastn_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            executable='/bin/bash')
+    redundant_copies = set()
+    if result.returncode == 0:
+        lines = result.stdout.split('\n')
+        for line in lines:
+            parts = line.split('\t')
+            if len(parts) != 12:
+                continue
+            query_name = parts[0]
+            subject_name = parts[1]
+            if query_name == subject_name:
+                continue
+            query_len = len(cur_copy_contigs[query_name])
+            subject_len = len(cur_copy_contigs[subject_name])
+
+            query_start = int(parts[6])
+            query_end = int(parts[7])
+            subject_start = int(parts[8])
+            subject_end = int(parts[9])
+            if abs(query_end - query_start) / query_len >= 0.95 and abs(
+                    subject_end - subject_start) / subject_len >= 0.95:
+                redundant_copies.add(query_name)
+                redundant_copies.add(subject_name)
+    # 遍历 cur_copy_contigs，取所有非冗余的拷贝
+    intact_copies = []
+    for cur_copy_name in cur_copy_contigs.keys():
+        if cur_copy_name not in redundant_copies:
+            intact_copies.append(copy_name_2_copy_dict[cur_copy_name])
+    # 在冗余拷贝中任取一个加入到拷贝中
+    if len(redundant_copies) > 0:
+        intact_copies.append(copy_name_2_copy_dict[list(redundant_copies)[0]])
+    return ltr_name, intact_copies
 
 def filter_ltr_by_copy_num_sub(candidate_sequence_path, threads, temp_dir, split_ref_dir, full_length_threshold, internal_ltrs, log):
     debug = 0
@@ -5239,7 +6045,6 @@ def get_domain_info(cons, lib, output_table, threads, temp_dir):
     for job in as_completed(jobs):
         cur_table = job.result()
         os.system('cat ' + cur_table + ' >> ' + output_table)
-
 
 def multiple_alignment_blastx_v1(repeats_path, merge_distance):
     split_repeats_path = repeats_path[0]
@@ -5456,6 +6261,7 @@ def multiple_alignment_blastx_v1(repeats_path, merge_distance):
             domain_array = keep_longest_query[query_name]
             # for domain_info in domain_array:
             #     f_save.write(query_name+'\t'+str(domain_info[6])+'\t'+str(domain_info[0])+'\t'+str(domain_info[1])+'\t'+str(domain_info[3])+'\t'+str(domain_info[4])+'\n')
+
             merge_domains = []
             domain_array.sort(key=lambda x: -x[2])
             for domain_info in domain_array:
@@ -5502,6 +6308,114 @@ def multiple_alignment_blastx_v1(repeats_path, merge_distance):
     f_save.close()
     return cur_table
 
+def get_domain_info_v1(cons, lib, threads, temp_dir):
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+
+    blast_db_command = 'makeblastdb -dbtype prot -in ' + lib + ' > /dev/null 2>&1'
+    os.system(blast_db_command)
+    partitions_num = int(threads)
+    split_files = split_fasta(cons, temp_dir, partitions_num)
+    merge_distance = 100
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for partition_index, cur_consensus_path in enumerate(split_files):
+        cur_output = temp_dir + '/'+str(partition_index)+'.out'
+        cur_table = temp_dir + '/' + str(partition_index) + '.tbl'
+        cur_file = (cur_consensus_path, lib, cur_output, cur_table)
+        job = ex.submit(multiple_alignment_blastx_v2, cur_file)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+
+    query_protein_types = {}
+    for job in as_completed(jobs):
+        cur_query_protein_types = job.result()
+        query_protein_types.update(cur_query_protein_types)
+    return query_protein_types
+
+def multiple_alignment_blastx_v2(repeats_path):
+    split_repeats_path = repeats_path[0]
+    protein_db_path = repeats_path[1]
+    blastx2Results_path = repeats_path[2]
+    cur_table = repeats_path[3]
+    orf_path = split_repeats_path + '.TE.orfs'
+    getorf_command = 'getorf -sequence ' + split_repeats_path + ' --outseq ' + orf_path + ' -minsize 400 -reverse ' + ' > /dev/null 2>&1'
+    os.system(getorf_command)
+    align_command = 'blastp -db ' + protein_db_path + ' -num_threads ' \
+                    + str(1) + ' -query ' + orf_path + ' -outfmt 6 | sort -k1,1 -k12,12nr | sort -u -k1,1 > ' + blastx2Results_path
+    os.system(align_command)
+
+    query_protein_types = {}
+    with open(blastx2Results_path, 'r') as f_r:
+        for idx, line in enumerate(f_r):
+            parts = line.split('\t')
+            query_name = parts[0].rpartition('_')[0]
+            subject_name = parts[1]
+            protein_type = subject_name.split('#')[1]
+            if not query_protein_types.__contains__(query_name):
+                query_protein_types[query_name] = set()
+            protein_types = query_protein_types[query_name]
+            protein_types.add(protein_type)
+    f_r.close()
+    return query_protein_types
+
+def get_domain_info_v2(cons, lib, threads, temp_dir, tool_dir):
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+
+    blast_db_command = 'makeblastdb -dbtype prot -in ' + lib + ' > /dev/null 2>&1'
+    os.system(blast_db_command)
+
+    cons_names, cons_contigs = read_fasta(cons)
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for name in cons_names:
+        cur_contigs = {}
+        cur_contigs[name] = cons_contigs[name]
+        cur_path = temp_dir + '/'+str(name)+'.fa'
+        store_fasta(cur_contigs, cur_path)
+        cur_file = (name, cur_path, lib)
+        job = ex.submit(multiple_alignment_blastx_v3, cur_file, tool_dir)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+
+    query_protein_types = {}
+    for job in as_completed(jobs):
+        cur_query_protein_types = job.result()
+        query_protein_types.update(cur_query_protein_types)
+    return query_protein_types
+
+def multiple_alignment_blastx_v3(repeats_path, tool_dir):
+    query_name = repeats_path[0]
+    split_repeats_path = repeats_path[1]
+    protein_db_path = repeats_path[2]
+
+    get_domain_command = 'sh ' + tool_dir + '/get_domain_table.sh ' + split_repeats_path + ' ' + protein_db_path + ' > /dev/null 2>&1'
+    os.system(get_domain_command)
+
+    orf_table = split_repeats_path + '.orftetable.clean'
+    query_protein_types = {}
+    if os.path.exists(orf_table):
+        with open(orf_table, 'r') as f_r:
+            for idx, line in enumerate(f_r):
+                parts = line.split('\t')
+                if len(parts) != 9:
+                    continue
+                subject_name = parts[2]
+                protein_type = parts[3]
+                orf_start = int(parts[0])
+                orf_end = int(parts[1])
+                orf_len = abs(orf_end-orf_start)
+                protein_len = int(parts[8])
+                if float(protein_len)/orf_len < 0.5:
+                    continue
+                if query_name not in query_protein_types:
+                    query_protein_types[query_name] = set()
+                protein_types = query_protein_types[query_name]
+                protein_types.add(protein_type)
+        f_r.close()
+    return query_protein_types
+
 def get_recombination_ltr(ltr_candidates, ref_contigs, threads, log):
     ex = ProcessPoolExecutor(threads)
     jobs = []
@@ -5528,6 +6442,37 @@ def get_recombination_ltr(ltr_candidates, ref_contigs, threads, log):
             recombination_candidates.append(cur_candidate_index)
     return recombination_candidates
 
+def remove_dirty_LTR(confident_lines, log):
+    new_confident_lines = []
+    dirty_lines = []
+    for i, cur_line in enumerate(confident_lines):
+        parts = cur_line.split(' ')
+        cur_left_ltr_start = int(parts[3])
+        cur_left_ltr_end = int(parts[4])
+        cur_right_ltr_start = int(parts[6])
+        cur_right_ltr_end = int(parts[7])
+        is_dirty = False
+        for j in range(i+1, len(confident_lines)):
+            next_line = confident_lines[j]
+            parts = next_line.split(' ')
+            next_left_ltr_start = int(parts[3])
+            next_left_ltr_end = int(parts[4])
+            next_right_ltr_start = int(parts[6])
+            next_right_ltr_end = int(parts[7])
+            # 如果 next_left_ltr_start 和 next_right_ltr_end 在 当前LTR序列的内部，则认为当前LTR不干净
+            if cur_left_ltr_end < next_left_ltr_start < cur_right_ltr_start and cur_left_ltr_end < next_right_ltr_end < cur_right_ltr_start:
+                is_dirty = True
+                break
+            if next_left_ltr_start > cur_right_ltr_end:
+                break
+
+        if not is_dirty:
+            new_confident_lines.append(cur_line)
+        else:
+            dirty_lines.append(cur_line)
+    log.logger.debug('Remove dirty LTR: ' + str(len(dirty_lines)) + ', remaining LTR num: ' + str(len(new_confident_lines)))
+    # print(dirty_lines)
+    return new_confident_lines
 
 def deredundant_for_LTR(redundant_ltr, work_dir, threads, type, coverage_threshold):
     # We found that performing a direct mafft alignment on the redundant LTR library was too slow.
@@ -6230,9 +7175,6 @@ def FMEA_new(query_path, blastn2Results_path, full_length_threshold):
         for subject_name in subject_dict.keys():
             subject_pos = subject_dict[subject_name]
 
-            # if query_name == 'Chr1_4990099-4997254-int#LTR' and subject_name == 'Chr451_1655236-1664338-int#LTR':
-            #     print('h')
-
             # cluster all closed fragments, split forward and reverse records
             forward_pos = []
             reverse_pos = []
@@ -6264,7 +7206,7 @@ def FMEA_new(query_path, blastn2Results_path, full_length_threshold):
                         if cur_query_start - prev_query_end < skip_gap and cur_query_end > prev_query_end \
                                 and cur_subject_start - prev_subject_end < skip_gap:  # \
                             # extend frag
-                            prev_query_start = prev_query_start
+                            prev_query_start = prev_query_start if prev_query_start < cur_query_start else cur_query_start
                             prev_query_end = cur_query_end
                             prev_subject_start = prev_subject_start if prev_subject_start < cur_subject_start else cur_subject_start
                             prev_subject_end = cur_subject_end
@@ -6931,6 +7873,49 @@ def get_confident_TIR(candidate_tir_path, tool_dir):
         TIR_info[orig_name.split(' ')[0]] = (lTIR_start, lTIR_end, rTIR_start, rTIR_end)
     return TIR_info
 
+def judge_tir_terminal(name, first50, end50):
+    blastn_command = f"blastn -subject <(echo -e \"{first50}\") -query <(echo -e \"{end50}\") -outfmt 6 -num_threads 1 -word_size 7"
+    result = subprocess.run(blastn_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            executable='/bin/bash')
+
+    is_tir = False
+    if result.returncode == 0:
+        blastn_lines = result.stdout.strip().split('\n')
+        for i, blastn_line in enumerate(blastn_lines):
+            if len(blastn_line) > 0:
+                parts = blastn_line.split('\t')
+                q_start = int(parts[6])
+                q_end = int(parts[7])
+                s_start = int(parts[8])
+                s_end = int(parts[9])
+                # 如果存在反向比对，且比对长度大于10，则认为是TIR
+                if s_start > s_end and s_start - s_end > 10:
+                    is_tir = True
+                    break
+    return name, is_tir
+
+def get_confident_TIR_v1(candidate_tir_path, threads):
+    tir_names, tir_contigs = read_fasta(candidate_tir_path)
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for name in tir_names:
+        seq = tir_contigs[name]
+        if len(seq) > 100:
+            terminal_len = 50
+        else:
+            terminal_len = int(len(seq) / 2)
+        first50 = seq[: terminal_len]
+        end50 = seq[-terminal_len: ]
+        job = ex.submit(judge_tir_terminal, name, first50, end50)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    all_tirs = {}
+    for job in as_completed(jobs):
+        name, is_tir = job.result()
+        if is_tir:
+            all_tirs[name] = 1
+    return all_tirs
+
 def run_command_with_timeout(command, timeout):
     process = subprocess.Popen(command, shell=True)
     start_time = time.time()
@@ -7274,9 +8259,30 @@ def filter_ltr_by_structure(output_path, structure_output_path, leftLtr2Candidat
                 ltr_dict[ltr_name] = 0
             f_save.write(ltr_name + '\t' + str(ltr_dict[ltr_name]) + '\n')
 
+def is_ltr_has_structure(ltr_name, line, ref_seq):
+    left_size = 8
+    internal_size = 3
+    parts = line.split(' ')
+    chr_name = parts[11]
+    lLTR_start = int(parts[3])
+    lLTR_end = int(parts[4])
+    rLTR_start = int(parts[6])
+    rLTR_end = int(parts[7])
 
+    # 取左/右侧 8bp + 3bp
+    # 计算左LTR的切片索引，并确保它们在范围内
+    left_start = max(lLTR_start - 1 - left_size, 0)
+    left_end = min(lLTR_start + internal_size - 1, len(ref_seq))
+    left_seq = ref_seq[left_start: left_end]
 
-def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, log):
+    # 计算右LTR的切片索引，并确保它们在范围内
+    right_start = max(rLTR_end - internal_size, 0)
+    right_end = min(rLTR_end + left_size, len(ref_seq))
+    right_seq = ref_seq[right_start: right_end]
+    cur_seq_name, cur_is_tp = search_ltr_structure(ltr_name, left_seq, right_seq)
+    return cur_seq_name, cur_is_tp
+
+def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, flanking_len, log):
     true_ltr_names = []
     ltr_dict = {}
     with open(output_path, 'r') as f_r:
@@ -7296,9 +8302,10 @@ def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, le
     jobs = []
     for ltr_name in true_ltr_names:
         cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
+        if not os.path.exists(cur_matrix_file):
+            continue
         TE_type = 'tir'
-        plant = 1
-        job = ex.submit(judge_boundary_v5, cur_matrix_file, ltr_name, TE_type, plant)
+        job = ex.submit(judge_boundary_v5, cur_matrix_file, ltr_name, TE_type, flanking_len)
         jobs.append(job)
     ex.shutdown(wait=True)
     # 收集候选的 TIR 序列
@@ -7371,9 +8378,10 @@ def filter_helitron(output_path, helitron_output_path, full_length_output_dir, t
     jobs = []
     for ltr_name in true_ltr_names:
         cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
+        if not os.path.exists(cur_matrix_file):
+            continue
         TE_type = 'helitron'
-        plant = 1
-        job = ex.submit(judge_boundary_v5, cur_matrix_file, ltr_name, TE_type, plant)
+        job = ex.submit(judge_boundary_v5, cur_matrix_file, ltr_name, TE_type, flanking_len)
         jobs.append(job)
     ex.shutdown(wait=True)
     # 收集候选的 Helitron 序列
@@ -7431,7 +8439,7 @@ def filter_helitron(output_path, helitron_output_path, full_length_output_dir, t
         for ltr_name in ltr_dict.keys():
             f_save.write(ltr_name+'\t'+str(ltr_dict[ltr_name])+'\n')
 
-def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, log):
+def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, flanking_len, log):
     true_ltr_names = []
     ltr_dict = {}
     with open(output_path, 'r') as f_r:
@@ -7450,7 +8458,9 @@ def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, 
     jobs = []
     for ltr_name in true_ltr_names:
         cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
-        job = ex.submit(judge_boundary_v6, cur_matrix_file, ltr_name)
+        if not os.path.exists(cur_matrix_file):
+            continue
+        job = ex.submit(judge_boundary_v6, cur_matrix_file, ltr_name, flanking_len)
         jobs.append(job)
     ex.shutdown(wait=True)
     # 收集候选的 sine 序列
@@ -8319,4 +9329,28 @@ def get_intact_ltr_copies(ltr_copies, ltr_lines, full_length_threshold, referenc
                     intact_ltr_copies[ltr_name] = []
                 copies = intact_ltr_copies[ltr_name]
                 copies.append((chr_name, start, end))
+
+    # 去除全长拷贝中的冗余拷贝，即短的那一条包含在长的里面
+    for ltr_name in intact_ltr_copies.keys():
+        copies = intact_ltr_copies[ltr_name]
+        copies.sort(key=lambda x: (x[2]-x[1]))
+        filtered_copies = []
+        for i in range(len(copies)):
+            chr_name_i, start_i, end_i = copies[i]
+            length_i = end_i - start_i + 1
+            is_redundant = False
+            for j in range(i + 1, len(copies)):
+                chr_name_j, start_j, end_j = copies[j]
+                length_j = end_j - start_j + 1
+                if chr_name_i == chr_name_j:
+                    overlap_start = max(start_i, start_j)
+                    overlap_end = min(end_i, end_j)
+                    overlap_length = overlap_end - overlap_start + 1
+                    # 判断是否冗余（即 95% 的拷贝 i 被包含在拷贝 j 中）
+                    if overlap_length >= 0.95 * length_i:
+                        is_redundant = True
+                        break
+            if not is_redundant:
+                filtered_copies.append((chr_name_i, start_i, end_i))
+        intact_ltr_copies[ltr_name] = filtered_copies
     return intact_ltr_copies

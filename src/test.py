@@ -31,7 +31,7 @@ from utils.data_util import read_fasta, store_fasta, read_fasta_v1, replace_non_
     transfer_RMOut2Bed, generate_random_sequences, generate_random_sequence, word_seq, generate_kmer_list, \
     cluster_sequences, generate_random_sequence_v1, generate_expand_matrix, find_files_recursively, \
     split_list_into_groups, expand_matrix_dir, get_matrix_feature_v3, generate_kmer_dic, expand_matrix_dir_v1, \
-    get_domain_info
+    get_domain_info, generate_sort_matrix
 from utils.evaluate_util import generate_TERL_dataset, generate_ClassifyTE_dataset, evaluate_RepeatClassifier, \
     evaluate_TERL, evaluate_DeepTE, transform_DeepTE_to_fasta, add_ClassifyTE_classification, evaluate_ClassifyTE, \
     evaluate_TEsorter, merge_overlapping_intervals, get_metrics_by_label, plot_3D_param, analyze_class_ratio_gff
@@ -42,7 +42,8 @@ from Util import judge_both_ends_frame_v1, filter_ltr_by_homo, multi_process_ali
     get_high_copy_LTR, judge_right_frame_LTR, judge_boundary_v5, judge_boundary_v6, remove_sparse_col_in_align_file, \
     random_downsample, find_tir_in_ltr, get_full_length_copies_batch, multi_process_align_v3, \
     judge_ltr_from_both_ends_frame, generate_both_ends_frame_for_intactLTR, multi_process_align, judge_both_ends_frame, \
-    get_full_length_copies, filter_ltr_by_flank_seq_v1, get_full_length_copies_v1, map_fragment, get_intact_ltr_copies
+    get_full_length_copies, filter_ltr_by_flank_seq_v1, get_full_length_copies_v1, map_fragment, get_intact_ltr_copies, \
+    get_confident_TIR_v1, get_copies_v2, get_domain_info_v1, get_domain_info_v2, remove_copies_from_redundant_contig
 from clean_LTR_internal import purge_internal_seq, purge_internal_seq_by_table
 
 
@@ -398,7 +399,7 @@ def get_mask_regions(std_out):
 
 def BM_EDTA():
     # 自己编写程序，尝试获得和BM_EDTA一致的结果
-    work_dir = '/home/hukang/HybridLTR-main/demo/test_dmel10'
+    work_dir = '/home/hukang/HybridLTR-main/demo/zebrafish'
     genome = work_dir + '/genome.rename.fa'
     std_out = work_dir + '/repbase.edta.out'
     test_out = work_dir + '/HiTE.edta.out'
@@ -660,8 +661,141 @@ if __name__ == '__main__':
     # # get_domain_info(internal_seq_filter, line_db, output_table, threads, temp_dir)
     # purge_internal_seq_by_table(internal_seq_filter, line_db, clean_internal_seq, output_table)
 
-    # BM_EDTA()
+    BM_EDTA()
     # BM_HiTE()
+
+    # # 过滤来自冗余contig的拷贝，即取拷贝的左侧100bp+右侧100bp组成的序列仍然能够很好比对
+    # work_dir = '/home/hukang/HybridLTR-main/demo/zebrafish'
+    # reference = work_dir + '/genome.rename.fa'
+    # flanking_len = 100
+    # ref_names, ref_contigs = read_fasta(reference)
+    #
+    # intact_ltr_copies = {}
+    # # copy1 = ('Chr307', 880067, 891620)
+    # # copy2 = ('Chr361', 259235, 270788)
+    # # copies = [copy1, copy2]
+    # # intact_ltr_copies['chr_12-880068-880443'] = copies
+    #
+    # copy1 = ('Chr349', 199084, 220908)
+    # copy2 = ('Chr431', 66061484, 66083654)
+    # copies = [copy1, copy2]
+    # intact_ltr_copies['chr_1246-199085-199697'] = copies
+    # temp_dir = work_dir + '/intact_ltr_deredundant'
+    # threads= 40
+    # intact_ltr_copies = remove_copies_from_redundant_contig(intact_ltr_copies, reference, temp_dir, threads)
+    # print(intact_ltr_copies)
+
+
+    # copy1_flank_seq = ref_contigs[copy1[0]][copy1[1]- flanking_len: copy1[2] + flanking_len]
+    # copy2_flank_seq = ref_contigs[copy2[0]][copy2[1] - flanking_len: copy2[2] + flanking_len]
+    # print(copy1_flank_seq)
+    # print(copy2_flank_seq)
+
+
+    # work_dir = '/home/hukang/HybridLTR-main/demo/test_ath30'
+    # matrix_file = work_dir + '/ltr_both_frames/chr_1-4149396-4150946.matrix'
+    # keep_matrix_file = work_dir + '/ltr_both_frames_sort/chr_1-4149396-4150946.matrix'
+    # temp_seq = work_dir + '/chr_1-4149396-4150946.fa'
+    # temp_cons = work_dir + '/chr_1-4149396-4150946.cons'
+    # is_keep = generate_sort_matrix(matrix_file, keep_matrix_file, temp_seq, temp_cons)
+    # print(is_keep)
+
+    # ltr_copies_path = '/home/hukang/HybridLTR-main/demo/rice/ltr_copies.json'
+    # with open(ltr_copies_path, 'r', encoding='utf-8') as f:
+    #     intact_ltr_copies = json.load(f)
+    #
+    # for ltr_name in intact_ltr_copies.keys():
+    #     copies = intact_ltr_copies[ltr_name]
+    #     copies.sort(key=lambda x: (x[2]-x[1]))
+    #     filtered_copies = []
+    #     for i in range(len(copies)):
+    #         chr_name_i, start_i, end_i = copies[i]
+    #         length_i = end_i - start_i + 1
+    #         is_redundant = False
+    #         for j in range(i + 1, len(copies)):
+    #             chr_name_j, start_j, end_j = copies[j]
+    #             length_j = end_j - start_j + 1
+    #             if chr_name_i == chr_name_j:
+    #                 overlap_start = max(start_i, start_j)
+    #                 overlap_end = min(end_i, end_j)
+    #                 overlap_length = overlap_end - overlap_start + 1
+    #                 # 判断是否冗余（即 95% 的拷贝 i 被包含在拷贝 j 中）
+    #                 if overlap_length >= 0.95 * length_i:
+    #                     is_redundant = True
+    #                     break
+    #         if not is_redundant:
+    #             filtered_copies.append((chr_name_i, start_i, end_i))
+    #     if len(filtered_copies) != len(copies):
+    #         print(ltr_name)
+    #     intact_ltr_copies[ltr_name] = filtered_copies
+
+    # work_dir = '/home/hukang/HybridLTR-main/demo/rice'
+    # single_copy_internals_file = work_dir + '/chr_5_25085532-25094316-int.fa'
+    # protein_db = '/home/hukang/HybridLTR-main/databases/LTRPeps.lib'
+    # threads = 40
+    # temp_dir = work_dir + '/domain'
+    # tool_dir = '/home/hukang/HybridLTR-main/tools'
+    # query_protein_types = get_domain_info_v2(single_copy_internals_file, protein_db, threads, temp_dir, tool_dir)
+    # print(query_protein_types)
+    #
+    # name = 'chr_3-18315270-18315465'
+    # # 如果单拷贝LTR的内部序列有蛋白质、且蛋白质类型单一就认为是真实的LTR
+    # # if name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name]:
+    # if name in query_protein_types:
+    #     protein_types = query_protein_types[name]
+    #     first_protein = next(iter(protein_types))
+    #     if len(protein_types) == 1 and 'LTR' in first_protein:
+    #         cur_is_ltr = 1
+    #     else:
+    #         cur_is_ltr = 0
+    # else:
+    #     cur_is_ltr = 0
+
+    # work_dir = '/home/hukang/HybridLTR-main/demo/test_ath27'
+    # single_copy_internals_file = work_dir + '/single_copy_internal.fa'
+    # protein_db = '/home/hukang/HybridLTR-main/databases/RepeatPeps.lib'
+    # threads = 40
+    # temp_dir = work_dir + '/domain'
+    # query_protein_types = get_domain_info_v1(single_copy_internals_file, protein_db, threads, temp_dir)
+    # print(query_protein_types)
+
+    # # 将scn_line写成fasta格式文件
+    # # 199083 220916 21834 199085 199697 613 220297 220908 612 89.0 NA chr_1246
+    # # 199083 220916 21834 199085 199696 612 220297 220909 613 89.0 NA chr_1246
+    # lines = ['199083 220916 21834 199085 199697 613 220297 220908 612 89.0 NA chr_1246', '199083 220916 21834 199085 199696 612 220297 220909 613 89.0 NA chr_1246']
+    # genome = '/home/hukang/LTR_Benchmarking/LTR_libraries/LTR_detector/zebrafish/GCF_000002035.6_GRCz11_genomic.rename.fna'
+    # work_dir = '/home/hukang/HybridLTR-main/demo/test_zebrafish'
+    # test_path = work_dir + '/test.fa'
+    # ref_names, ref_contigs = read_fasta(genome)
+    # contigs = {}
+    # for line in lines:
+    #     parts = line.split(' ')
+    #     chr_name = parts[11]
+    #     ref_seq = ref_contigs[chr_name]
+    #
+    #     lLTR_start = int(parts[3])
+    #     lLTR_end = int(parts[4])
+    #     rLTR_start = int(parts[6])
+    #     rLTR_end = int(parts[7])
+    #     intact_LTR = ref_seq[lLTR_start - 1: rLTR_end]
+    #     internal_LTR = ref_seq[lLTR_end: rLTR_start]
+    #     seq_name = str(chr_name) + '-' + str(lLTR_start) + '-' + str(rLTR_end)
+    #     contigs[seq_name] = intact_LTR
+    # store_fasta(contigs, test_path)
+    #
+    #
+    # work_dir = '/home/hukang/HybridLTR-main/demo/zebrafish'
+    # test_path = work_dir + '/chr_1246_199083-220916-int.fa'
+    # split_ref_dir = work_dir + '/ref_chr'
+    # threads = 40
+    # max_copy_num = 100
+    # full_length_threshold = 0.95
+    # ltr_copies = get_full_length_copies_v1(test_path, split_ref_dir, max_copy_num, full_length_threshold, debug=1)
+    # print(ltr_copies)
+    # print(len(ltr_copies))
+
+
+
 
 
     # # 将 RepeatPeps.lib 拆成 LTRPeps.lib 和 OtherPeps.lib
@@ -702,7 +836,7 @@ if __name__ == '__main__':
     # threads = 40
     # filter_ltr_by_flank_seq_v1(scn_file, filter_scn, genome, threads, log=None)
 
-    # work_dir = '/home/hukang/HybridLTR-main/demo/test_dmel10'
+    # work_dir = '/home/hukang/HybridLTR-main/demo/rice'
     # split_ref_dir = work_dir + '/ref_chr'
     # threads = 40
     # confident_ltr_internal = work_dir + '/test.fa'
@@ -754,9 +888,9 @@ if __name__ == '__main__':
     # clean_output = output
     # remove_nest(blastnResults_path, input1, input2, clean_output, iter_num, coverage=0.95)
 
-    # work_dir = '/home/hukang/LTR_Benchmarking/LTR_libraries/Ours/maize/test'
-    # matrix_file = work_dir + '/chr_6:71142757-71143336.matrix'
-    # align_file = work_dir + '/chr_6:71142757-71143336.matrix.maf.fa'
+    # work_dir = '/home/hukang/HybridLTR-main/demo/zebrafish'
+    # matrix_file = work_dir + '/chr_13-9928724-9929264.matrix'
+    # align_file = work_dir + '/chr_13-9928724-9929264.matrix.maf.fa'
     # matrix2align(matrix_file, align_file)
 
     # clean_align_file = work_dir + '/chr_4:115052633-115053548.blast.bed.fa.rdmSubset.fa.clean.maf.fa'
@@ -980,12 +1114,18 @@ if __name__ == '__main__':
     # if debug:
     #     print('right', matrix_file, is_right_ltr, new_boundary_end)
 
-    # cur_matrix_file = '/home/hukang/LTR_Benchmarking/LTR_libraries/Ours/zebrafish/test/chr_10_35233074-35233456.matrix'
+    # cur_matrix_file = '/home/hukang/HybridLTR-main/demo/test_zebrafish/chr_1395_152303-152654.matrix'
     # ltr_name = ''
     # TE_type = 'tir'
-    # plant = 1
-    # ltr_name, is_TE, info, final_cons_seq = judge_boundary_v5(cur_matrix_file, ltr_name, TE_type, plant)
+    # flanking_len = 500
+    # ltr_name, is_TE, info, final_cons_seq = judge_boundary_v5(cur_matrix_file, ltr_name, TE_type, flanking_len)
     # print(ltr_name, is_TE, info, final_cons_seq)
+
+    # candidate_tir_path = '/home/hukang/HybridLTR-main/demo/test_ath19/candidate_tir.fa'
+    # threads = 40
+    # all_confident_tirs = get_confident_TIR_v1(candidate_tir_path, threads)
+    # print(all_confident_tirs)
+    # print(len(all_confident_tirs))
 
     # output_dir = '/home/hukang/LTR_Benchmarking/LTR_libraries/Ours/zebrafish/test'
     # expand_output_dir = '/home/hukang/LTR_Benchmarking/LTR_libraries/Ours/zebrafish/test_expand'
@@ -1090,10 +1230,10 @@ if __name__ == '__main__':
     #                  + ' -G 0 -g 1 -A 80 -i ' + confident_ltr_terminal + ' -o ' + confident_ltr_internal_cons + ' -T 0 -M 0'
     # os.system(cd_hit_command + ' > /dev/null 2>&1')
 
-    cur_align_file = '/home/hukang/HybridLTR-main/demo/test_dmel10/raw_ltr_copies_cluster_internal/Ninja_13/0.fa.maf.fa'
-    cons_seq = cons_from_mafft(cur_align_file)
-    print(cons_seq)
-    print(len(cons_seq))
+    # cur_align_file = '/home/hukang/HybridLTR-main/demo/test_dmel10/raw_ltr_copies_cluster_internal/Ninja_13/0.fa.maf.fa'
+    # cons_seq = cons_from_mafft(cur_align_file)
+    # print(cons_seq)
+    # print(len(cons_seq))
 
     # # 输入k-mer特征的分布特点
     # matrix_file = '/home/hukang/left_LTR_real_dataset/clean_data/both_ends_frames_clean/negative/Oryza_sativa/Chr8_seg_7_12763883-12775122-lLTR.matrix'

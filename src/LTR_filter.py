@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from Util import read_fasta, store_fasta, read_fasta_v1, flank_region_align_v5, 
     filter_tir, filter_ltr_by_structure, filter_sine, filter_single_ltr, get_full_length_copies_batch_v1, \
     filter_helitron, filter_ltr_by_structure_low_copy, filter_ltr_by_flank_seq, \
     filter_ltr_by_flank_seq_v1, filter_ltr_by_flanking_cluster, filter_ltr_by_copy_num, filter_single_copy_ltr, \
-    deredundant_for_LTR_v1
+    deredundant_for_LTR_v1, get_domain_info, remove_dirty_LTR
 from configs import config
 from utils.data_util import expand_matrix_dir, expand_matrix_dir_v1, expand_matrix_dir_v2, sort_matrix_dir
 
@@ -29,6 +30,7 @@ if __name__ == '__main__':
     default_threads = int(cpu_count())
     default_miu = str(1.3e-8)
     default_flanking_len = 100
+    default_full_length_flanking_len = 500
 
     default_is_filter_single = 1
     default_is_remove_recomb = 1
@@ -41,8 +43,8 @@ if __name__ == '__main__':
     default_is_handle_low_copy = 1
     default_is_use_homo_rule = 1
     default_is_use_deep_model = 1
-    default_is_use_structure = 1
-    default_is_clean_internal = 1
+    default_is_use_structure = 0
+    default_is_clean_internal = 0
     default_is_remove_nested = 0
     default_is_deredundant = 1
     default_recover = 0
@@ -70,6 +72,8 @@ if __name__ == '__main__':
                         help='The neutral mutation rate (per bp per ya), default = [ ' + str(default_miu) + ' ]')
     parser.add_argument('--flanking_len', metavar='flanking_len',
                         help='The flanking length of candidates to find the true boundaries, default = [ ' + str(default_flanking_len) + ' ]')
+    parser.add_argument('--full_length_flanking_len', metavar='full_length_flanking_len',
+                        help='The flanking length of full-length candidates to find the true boundaries, default = [ ' + str(default_full_length_flanking_len) + ' ]')
     parser.add_argument('--skip_detect', metavar='skip_detect',
                         help='Whether to skip_HiTE, 1: true, 0: false. default = [ ' + str(default_skip_detect) + ' ]')
     parser.add_argument('--debug', metavar='is_debug',
@@ -129,6 +133,7 @@ if __name__ == '__main__':
     threads = args.thread
     miu = args.miu
     flanking_len = args.flanking_len
+    full_length_flanking_len = args.full_length_flanking_len
     skip_detect = args.skip_detect
     debug = args.debug
 
@@ -190,6 +195,11 @@ if __name__ == '__main__':
         flanking_len = default_flanking_len
     else:
         flanking_len = int(flanking_len)
+
+    if full_length_flanking_len is None:
+        full_length_flanking_len = default_full_length_flanking_len
+    else:
+        full_length_flanking_len = int(full_length_flanking_len)
 
     if miu is None:
         miu = default_miu
@@ -339,6 +349,10 @@ if __name__ == '__main__':
                 if candidate_index not in recombination_candidates:
                     line = ltr_lines[candidate_index]
                     confident_lines.append(line)
+
+            # 删除内部序列包含其他完整LTR的记录
+            confident_lines = remove_dirty_LTR(confident_lines, log)
+
             store_scn(confident_lines, remove_recomb_scn)
             log.logger.debug('Remove recombination LTR: ' + str(len(recombination_candidates)) + ', remaining LTR num: ' + str(len(confident_lines)))
         else:
@@ -367,7 +381,7 @@ if __name__ == '__main__':
             log.logger.error('Error: Chromosome names in the SCN file do not match the input genome names. Please correct this and rerun.')
             exit(-1)
         ref_seq = ref_contigs[chr_name]
-        left_ltr_name = chr_name + ':' + str(left_ltr_start) + '-' + str(left_ltr_end)
+        left_ltr_name = chr_name + '-' + str(left_ltr_start) + '-' + str(left_ltr_end)
         left_ltr_seq = ref_seq[left_ltr_start-1: left_ltr_end]
         # process duplicate name
         while left_ltr_name in left_LTR_contigs:
@@ -407,14 +421,17 @@ if __name__ == '__main__':
             full_length_output_dir = tmp_output_dir + '/full_length_frames'
             if not recover or not os.path.exists(output_dir) or not os.path.exists(full_length_output_dir): # or not os.path.exists(expand_output_dir):
                 log.logger.debug('Generate LTR frames')
-                generate_both_ends_frame_from_seq(left_ltr_path, reference, flanking_len, threads, temp_dir, output_dir, full_length_output_dir, split_ref_dir)
+                max_copy_num = 100
+                generate_both_ends_frame_from_seq(left_ltr_path, reference, flanking_len, full_length_flanking_len,
+                                                  threads, temp_dir, output_dir, full_length_output_dir, split_ref_dir,
+                                                  max_copy_num, coverage_threshold)
 
                 # min_raw_copy_num = 0
                 # expand_matrix_dir_v2(output_dir, expand_output_dir, threads, min_raw_copy_num)
             else:
                 log.logger.info(output_dir + ' exists, skip...')
                 # log.logger.info(expand_output_dir + ' exists, skip...')
-                log.logger.info(full_length_output_dir + ' exists, ski                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     p...')
+                log.logger.info(full_length_output_dir + ' exists, skip...')
             # output_dir = expand_output_dir
 
             # 去掉某一侧侧翼窗口高度同源的，通常是 truncated 的终端或重复区。
@@ -508,7 +525,7 @@ if __name__ == '__main__':
                 result_file = tir_output_path
                 if not recover or not file_exist(result_file):
                     # Step 4.2 识别窗口两侧是否具有 TIR TSD特征，如果有超过10个拷贝有TSD特征，则认为是假阳性
-                    filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, log)
+                    filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, full_length_flanking_len, log)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = tir_output_path
@@ -517,7 +534,7 @@ if __name__ == '__main__':
                 helitron_output_path = tmp_output_dir + '/is_LTR_helitron.txt'
                 result_file = helitron_output_path
                 if not recover or not file_exist(result_file):
-                    filter_helitron(output_path, helitron_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, project_dir, flanking_len, log)
+                    filter_helitron(output_path, helitron_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, project_dir, full_length_flanking_len, log)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = helitron_output_path
@@ -527,7 +544,7 @@ if __name__ == '__main__':
                 result_file = sine_output_path
                 if not recover or not file_exist(result_file):
                     # Step 4.3 识别序列是否具有 SINE tail
-                    filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, log)
+                    filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, full_length_flanking_len, log)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = sine_output_path
@@ -543,20 +560,28 @@ if __name__ == '__main__':
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = structure_output_path
 
-            # Step 0: Filter out LTRs with a full-length copy number <= 1. For the remaining LTRs, determine if they are caused by genomic redundant contigs, i.e., whether they can be filtered out according to the rule-based method after extending by 100bp.
             if is_filter_single:
                 intact_output_path = tmp_output_dir + '/intact_LTR_homo.txt'
                 result_file = intact_output_path
                 if not recover or not file_exist(intact_output_path):
-                    log.logger.info('Filter out LTRs with a full-length copy number <= 1')
+                    log.logger.info('Process LTRs with a full-length copy number <= 1')
                     # filter_single_ltr(output_path, intact_output_path, leftLtr2Candidates, ltr_lines, reference, flanking_len, tmp_output_dir, split_ref_dir, threads, log)
-                    is_ltr_has_structure, ltr_copies, internal_ltrs = filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, coverage_threshold, log)
+                    # is_ltr_has_structure, ltr_copies, internal_ltrs = filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, coverage_threshold, log)
+                    ltr_copies, internal_ltrs = filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, coverage_threshold, log)
 
-                    # 处理单拷贝LTR。我们只保留具有 TSD + TG...CA 结构的单拷贝或者内部具有完整protein的。
+                    # 把ltr_copies存成文件
+                    ltr_copies_json = tmp_output_dir + '/ltr_copies.json'
+                    with open(ltr_copies_json, 'w', encoding='utf-8') as f:
+                        json.dump(ltr_copies, f, ensure_ascii=False, indent=4)
+
+                    # 处理单拷贝LTR。我们只保留具有 TSD 结构的单拷贝 且 内部具有完整protein的。
                     lib_dir = project_dir + '/databases'
-                    protein_db = lib_dir + '/LTRPeps.lib'
+                    ltr_protein_db = lib_dir + '/LTRPeps.lib'
+                    other_protein_db = lib_dir + '/OtherPeps.lib'
+                    # protein_db = lib_dir + '/RepeatPeps.lib'
                     single_copy_internals_file = tmp_output_dir + '/single_copy_internal.fa'
-                    filter_single_copy_ltr(intact_output_path, is_ltr_has_structure, single_copy_internals_file, ltr_copies, internal_ltrs, protein_db, tmp_output_dir, threads, log)
+                    #filter_single_copy_ltr(intact_output_path, is_ltr_has_structure, single_copy_internals_file, ltr_copies, internal_ltrs, protein_db, tmp_output_dir, threads, log)
+                    filter_single_copy_ltr(intact_output_path, single_copy_internals_file, ltr_copies, internal_ltrs, ltr_protein_db, other_protein_db, tmp_output_dir, threads, reference, leftLtr2Candidates, ltr_lines, log)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = intact_output_path
@@ -647,19 +672,52 @@ if __name__ == '__main__':
                 os.system(remove_nested_command)
                 confident_ltr_internal = clean_LTR_path
 
-        # # 判断内部序列是否在整个基因组上存在至少一个以上的全长拷贝
+        # # 将内部序列区分成高拷贝和低拷贝
         # temp_dir = tmp_output_dir + '/internal_blast_temp'
         # max_copy_num = 10
         # all_copies = get_full_length_copies_batch_v1(confident_ltr_internal, split_ref_dir, threads, temp_dir, max_copy_num, coverage_threshold)
         # confident_internal_names, confident_internal_contigs = read_fasta(confident_ltr_internal)
+        # low_copy_ltr_internal = confident_ltr_internal + '.low_copy'
+        # low_copy_internal_contigs = {}
+        # high_copy_internal_contigs = {}
+        # for name in all_copies.keys():
+        #     if len(all_copies[name]) < 5:
+        #         low_copy_internal_contigs[name] = confident_internal_contigs[name]
+        #     else:
+        #         high_copy_internal_contigs[name] = confident_internal_contigs[name]
+        # store_fasta(low_copy_internal_contigs, low_copy_ltr_internal)
+        #
+        # # 判断低拷贝内部序列是否具有蛋白质
+        # output_table = low_copy_ltr_internal + '.domain'
+        # temp_dir = tmp_output_dir + '/domain'
+        # lib_dir = project_dir + '/databases'
+        # protein_db = lib_dir + '/LTRPeps.lib'
+        # get_domain_info(low_copy_ltr_internal, protein_db, output_table, threads, temp_dir)
+        #
+        # is_low_copy_has_intact_protein = {}
+        # protein_names, protein_contigs = read_fasta(protein_db)
+        # with open(output_table, 'r') as f_r:
+        #     for i, line in enumerate(f_r):
+        #         if i < 2:
+        #             continue
+        #         parts = line.split('\t')
+        #         te_name = parts[0]
+        #         protein_name = parts[1]
+        #         protein_start = int(parts[4])
+        #         protein_end = int(parts[5])
+        #         intact_protein_len = len(protein_contigs[protein_name])
+        #         if float(abs(protein_end - protein_start)) / intact_protein_len >= 0.95:
+        #             is_low_copy_has_intact_protein[te_name] = True
+        #
         # confident_ltr_internal += '.confident'
         # filtered_internal_count = 0
-        # for name in all_copies.keys():
-        #     if len(all_copies[name]) < 2:
-        #         del confident_internal_contigs[name]
+        # for name in low_copy_internal_contigs.keys():
+        #     if name in is_low_copy_has_intact_protein and is_low_copy_has_intact_protein[name]:
+        #         high_copy_internal_contigs[name] = low_copy_internal_contigs[name]
+        #     else:
         #         filtered_internal_count += 1
-        # store_fasta(confident_internal_contigs, confident_ltr_internal)
-        # log.logger.info('Filter the number of LTR internals <= 1 full-length copy: ' + str(filtered_internal_count))
+        # store_fasta(high_copy_internal_contigs, confident_ltr_internal)
+        # log.logger.info('Filter un-reliable low copy LTR internals: ' + str(filtered_internal_count))
 
         confident_ltr_internal_cons = confident_ltr_internal + '.cons'
         if is_deredundant:
