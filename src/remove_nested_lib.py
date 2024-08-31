@@ -193,8 +193,6 @@ def remove_nest(blastnResults_path, query_path, subject_path, output, iter_num, 
 
             # 我们认为 比对上的 query 部分应该占它自身的95%以上，同时 比对上的 subject 部分应该不超过自身的 80%，此时我们认为query是subject的一个嵌合元素
             if float(q_len) / query_len >= coverage and float(s_len) / subject_len < 0.8:
-                # if subject_name == 'Chr451_8898275-8906382-int#LTR':
-                #     print('h')
                 # 保留subject上所有的比对位置，如果有重叠就合并重叠
                 if subject_name not in nested_alignments:
                     nested_alignments[subject_name] = []
@@ -205,8 +203,6 @@ def remove_nest(blastnResults_path, query_path, subject_path, output, iter_num, 
                     prev_frag = align
                     overlap_len = get_overlap_len(prev_frag, cur_frag)
                     if overlap_len > 0:
-                        # if subject_name == 'Chr451_8898275-8906382-int#LTR':
-                        #     print('h')
                         is_overlap = True
                         merge_frag = merge_overlap_seq(prev_frag, cur_frag)
                         keep_alignments[i] = (merge_frag[0], merge_frag[1], prev_frag[2] + cur_frag[2])

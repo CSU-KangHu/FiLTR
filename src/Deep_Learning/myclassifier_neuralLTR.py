@@ -301,9 +301,9 @@ def main():
         for i in range(len(ltr_names)):
             fw.write(ltr_names[i] + '\t' + str(preds[i]) + '\n')
 
-    with open(outpath + '/probs.txt', 'w') as fw:
-        for i in range(len(ltr_names)):
-            fw.write(f'{ltr_names[i]}\t{probs_array[i]}\n')
+    # with open(outpath + '/probs.txt', 'w') as fw:
+    #     for i in range(len(ltr_names)):
+    #         fw.write(f'{ltr_names[i]}\t{probs_array[i]}\n')
 
 if __name__ == "__main__":
     main()

@@ -20,22 +20,24 @@ from Util import read_fasta, store_fasta, read_fasta_v1, flank_region_align_v5, 
     filter_tir, filter_ltr_by_structure, filter_sine, filter_single_ltr, get_full_length_copies_batch_v1, \
     filter_helitron, filter_ltr_by_structure_low_copy, filter_ltr_by_flank_seq, \
     filter_ltr_by_flank_seq_v1, filter_ltr_by_flanking_cluster, filter_ltr_by_copy_num, filter_single_copy_ltr, \
-    deredundant_for_LTR_v1, get_domain_info, remove_dirty_LTR
+    deredundant_for_LTR_v1, get_domain_info, remove_dirty_LTR, filter_ltr_by_flank_seq_v2, deredundant_for_LTR_v2, \
+    deredundant_for_LTR_v3, deredundant_for_LTR_v4, deredundant_for_LTR_v5, get_all_potential_ltr_lines
 from configs import config
 from utils.data_util import expand_matrix_dir, expand_matrix_dir_v1, expand_matrix_dir_v2, sort_matrix_dir
 
 if __name__ == '__main__':
-    tool_name = 'Ltr_filter'
+    tool_name = 'HybridLTR'
     version_num = '0.0.1'
     default_threads = int(cpu_count())
     default_miu = str(1.3e-8)
     default_flanking_len = 100
-    default_full_length_flanking_len = 500
 
     default_is_filter_single = 1
-    default_is_remove_recomb = 1
+    default_is_process_dirty_internal = 1
     default_is_use_flank_align = 1
     default_is_use_flank_MSA = 1
+    default_is_flank_homo_cluster = 1
+    default_is_flank_homo_cluster_both = 1
     default_is_filter_tandem = 1
     default_is_filter_TIR = 1
     default_is_filter_Helitron = 1
@@ -44,13 +46,13 @@ if __name__ == '__main__':
     default_is_use_homo_rule = 1
     default_is_use_deep_model = 1
     default_is_use_structure = 0
-    default_is_clean_internal = 0
+    default_is_clean_internal = 1
     default_is_remove_nested = 0
     default_is_deredundant = 1
     default_recover = 0
 
     default_skip_detect = 0
-    default_debug = 1
+    default_debug = 0
     default_BM_RM2 = 0
     default_BM_EDTA = 0
     default_EDTA_home = ''
@@ -72,8 +74,6 @@ if __name__ == '__main__':
                         help='The neutral mutation rate (per bp per ya), default = [ ' + str(default_miu) + ' ]')
     parser.add_argument('--flanking_len', metavar='flanking_len',
                         help='The flanking length of candidates to find the true boundaries, default = [ ' + str(default_flanking_len) + ' ]')
-    parser.add_argument('--full_length_flanking_len', metavar='full_length_flanking_len',
-                        help='The flanking length of full-length candidates to find the true boundaries, default = [ ' + str(default_full_length_flanking_len) + ' ]')
     parser.add_argument('--skip_detect', metavar='skip_detect',
                         help='Whether to skip_HiTE, 1: true, 0: false. default = [ ' + str(default_skip_detect) + ' ]')
     parser.add_argument('--debug', metavar='is_debug',
@@ -81,12 +81,17 @@ if __name__ == '__main__':
 
     parser.add_argument('--is_filter_single', metavar='is_filter_single',
                         help='Whether to filter LTRs with full-length copy number <= 1. default = [ ' + str(default_is_filter_single) + ' ]')
-    parser.add_argument('--is_remove_recomb', metavar='is_remove_recomb',
-                        help='Whether to filter recombined LTRs. default = [ ' + str(default_is_remove_recomb) + ' ]')
+    parser.add_argument('--is_process_dirty_internal', metavar='is_process_dirty_internal',
+                        help='Whether to filter recombined LTRs. default = [ ' + str(default_is_process_dirty_internal) + ' ]')
     parser.add_argument('--is_use_flank_align', metavar='is_use_flank_align',
                         help='Whether to filter out false positives that can be aligned to the LTR terminal flanking sequences. default = [ ' + str(default_is_use_flank_align) + ' ]')
     parser.add_argument('--is_use_flank_MSA', metavar='is_use_flank_MSA',
                         help='Whether to use the flanking region multiple sequence alignment strategy for filtering. default = [ ' + str(default_is_use_flank_MSA) + ' ]')
+    parser.add_argument('--is_flank_homo_cluster', metavar='is_flank_homo_cluster',
+                        help='Whether to perform homology clustering on flanking windows. default = [ ' + str(default_is_flank_homo_cluster) + ' ]')
+    parser.add_argument('--is_flank_homo_cluster_both', metavar='is_flank_homo_cluster_both',
+                        help='Whether to perform homology clustering on flanking windows. default = [ ' + str(default_is_flank_homo_cluster_both) + ' ]')
+
     parser.add_argument('--is_filter_tandem', metavar='is_filter_tandem',
                         help='Whether to filter LTR terminals composed of tandem repeats. default = [ ' + str(default_is_filter_tandem) + ' ]')
     parser.add_argument('--is_filter_TIR', metavar='is_filter_TIR',
@@ -133,14 +138,15 @@ if __name__ == '__main__':
     threads = args.thread
     miu = args.miu
     flanking_len = args.flanking_len
-    full_length_flanking_len = args.full_length_flanking_len
     skip_detect = args.skip_detect
     debug = args.debug
 
     is_filter_single = args.is_filter_single
-    is_remove_recomb = args.is_remove_recomb
+    is_process_dirty_internal = args.is_process_dirty_internal
     is_use_flank_align = args.is_use_flank_align
     is_use_flank_MSA = args.is_use_flank_MSA
+    is_flank_homo_cluster = args.is_flank_homo_cluster
+    is_flank_homo_cluster_both = args.is_flank_homo_cluster_both
     is_filter_tandem = args.is_filter_tandem
     is_filter_TIR = args.is_filter_TIR
     is_filter_Helitron = args.is_filter_Helitron
@@ -196,11 +202,6 @@ if __name__ == '__main__':
     else:
         flanking_len = int(flanking_len)
 
-    if full_length_flanking_len is None:
-        full_length_flanking_len = default_full_length_flanking_len
-    else:
-        full_length_flanking_len = int(full_length_flanking_len)
-
     if miu is None:
         miu = default_miu
     else:
@@ -211,10 +212,10 @@ if __name__ == '__main__':
     else:
         is_filter_single = int(is_filter_single)
 
-    if is_remove_recomb is None:
-        is_remove_recomb = default_is_remove_recomb
+    if is_process_dirty_internal is None:
+        is_process_dirty_internal = default_is_process_dirty_internal
     else:
-        is_remove_recomb = int(is_remove_recomb)
+        is_process_dirty_internal = int(is_process_dirty_internal)
 
     if is_use_flank_align is None:
         is_use_flank_align = default_is_use_flank_align
@@ -225,6 +226,16 @@ if __name__ == '__main__':
         is_use_flank_MSA = default_is_use_flank_MSA
     else:
         is_use_flank_MSA = int(is_use_flank_MSA)
+
+    if is_flank_homo_cluster is None:
+        is_flank_homo_cluster = default_is_flank_homo_cluster
+    else:
+        is_flank_homo_cluster = int(is_flank_homo_cluster)
+
+    if is_flank_homo_cluster_both is None:
+        is_flank_homo_cluster_both = default_is_flank_homo_cluster_both
+    else:
+        is_flank_homo_cluster_both = int(is_flank_homo_cluster_both)
 
     if is_filter_tandem is None:
         is_filter_tandem = default_is_filter_tandem
@@ -337,12 +348,13 @@ if __name__ == '__main__':
     ref_names, ref_contigs = read_fasta(reference)
     ltr_candidates, ltr_lines = read_scn(scn_file, log, remove_dup=True)
 
+    dirty_dicts = {}
     # Step1: Filter records where the internal sequence of the current LTR contains its terminal sequences. This situation arises due to recombination involving shared terminals of two or more LTRs.
-    if is_remove_recomb:
+    if is_process_dirty_internal:
         remove_recomb_scn = tmp_output_dir + '/remove_recomb.scn'
         result_file = remove_recomb_scn
         if not recover or not file_exist(result_file):
-            log.logger.info('Start step1: Filter records where the internal sequence of the current LTR contains its terminal sequences. This situation arises due to recombination involving shared terminals of two or more LTRs.')
+            log.logger.info('Start step1: Process dirty internal LTR sequences')
             recombination_candidates = get_recombination_ltr(ltr_candidates, ref_contigs, threads, log)
             confident_lines = []
             for candidate_index in ltr_candidates.keys():
@@ -350,11 +362,18 @@ if __name__ == '__main__':
                     line = ltr_lines[candidate_index]
                     confident_lines.append(line)
 
-            # 删除内部序列包含其他完整LTR的记录
-            confident_lines = remove_dirty_LTR(confident_lines, log)
+            temp_path = tmp_output_dir + '/all_potential_ltr.json'
+            confident_lines = get_all_potential_ltr_lines(confident_lines, reference, threads, temp_path, log)
+
+            # 获取内部序列包含其他完整LTR的记录
+            dirty_dicts = remove_dirty_LTR(confident_lines, log)
 
             store_scn(confident_lines, remove_recomb_scn)
-            log.logger.debug('Remove recombination LTR: ' + str(len(recombination_candidates)) + ', remaining LTR num: ' + str(len(confident_lines)))
+            log.logger.debug('Current LTR num: ' + str(len(confident_lines)))
+
+            if not debug:
+                os.system('rm -f ' + temp_path)
+
         else:
             log.logger.info(result_file + ' exists, skip...')
         scn_file = remove_recomb_scn
@@ -364,7 +383,7 @@ if __name__ == '__main__':
         result_file = filter_terminal_align_scn
         if not recover or not file_exist(result_file):
             log.logger.info('Start step2: Filter out false positives that can be aligned to the LTR terminal flanking sequences.')
-            filter_ltr_by_flank_seq_v1(scn_file, filter_terminal_align_scn, reference, threads, log)
+            filter_ltr_by_flank_seq_v2(scn_file, filter_terminal_align_scn, reference, threads, log)
         else:
             log.logger.info(result_file + ' exists, skip...')
         scn_file = filter_terminal_align_scn
@@ -383,6 +402,9 @@ if __name__ == '__main__':
         ref_seq = ref_contigs[chr_name]
         left_ltr_name = chr_name + '-' + str(left_ltr_start) + '-' + str(left_ltr_end)
         left_ltr_seq = ref_seq[left_ltr_start-1: left_ltr_end]
+        is_all_n = all(char == 'N' for char in left_ltr_seq)
+        if is_all_n:
+            continue
         # process duplicate name
         while left_ltr_name in left_LTR_contigs:
             left_ltr_name += '-replicate'
@@ -400,62 +422,77 @@ if __name__ == '__main__':
             os.system(tandem_filter_command)
         else:
             log.logger.info(result_file + ' exists, skip...')
+
+        if not debug:
+            os.system('rm -f ' + left_ltr_path)
+
         left_ltr_path = left_ltr_filter_path
         filter_left_ltr_names, filter_left_ltr_contigs = read_fasta(left_ltr_path)
         log.logger.debug('Remove tandem LTR: ' + str(len(left_LTR_contigs) - len(filter_left_ltr_contigs)) + ', remaining LTR num: ' + str(len(filter_left_ltr_contigs)))
 
+
+    # 将 left LTR 存成 scn 文件
+    left_ltr_names, left_ltr_contigs = read_fasta(left_ltr_path)
+    output_path = tmp_output_dir + '/left_ltr.scn'
+    with open(output_path, 'w') as f_save:
+        for cur_name in left_ltr_names:
+            f_save.write(cur_name + '\t' + str(1) + '\n')
+
+
     if is_use_flank_MSA:
         # Step 3: Filter out false positive sequences based on the flanking regions of the terminal sequences.
         log.logger.info('Step 3: Filter out false positive sequences based on the flanking regions of the terminal sequences.')
-
-        confident_scn = tmp_output_dir + '/confident_ltr.scn'
-        result_file = confident_scn
+        confident_msa_file = tmp_output_dir + '/msa_flank.txt'
+        result_file = confident_msa_file
         if not recover or not file_exist(result_file):
             if os.path.exists(result_file):
                 os.system('rm -f ' + result_file)
-
             # Perform a multiple sequence alignment of the regions flanking the LTR terminal sequence copies.
             temp_dir = tmp_output_dir + '/candidate_ltr'
             output_dir = tmp_output_dir + '/ltr_both_frames'
-            # expand_output_dir = output_dir + '_expand'
             full_length_output_dir = tmp_output_dir + '/full_length_frames'
-            if not recover or not os.path.exists(output_dir) or not os.path.exists(full_length_output_dir): # or not os.path.exists(expand_output_dir):
+            if not recover or not os.path.exists(output_dir) or not os.path.exists(full_length_output_dir):
                 log.logger.debug('Generate LTR frames')
                 max_copy_num = 100
-                generate_both_ends_frame_from_seq(left_ltr_path, reference, flanking_len, full_length_flanking_len,
-                                                  threads, temp_dir, output_dir, full_length_output_dir, split_ref_dir,
-                                                  max_copy_num, coverage_threshold)
-
-                # min_raw_copy_num = 0
-                # expand_matrix_dir_v2(output_dir, expand_output_dir, threads, min_raw_copy_num)
+                generate_both_ends_frame_from_seq(left_ltr_path, reference, flanking_len, threads, temp_dir, output_dir,
+                                                  full_length_output_dir, split_ref_dir, max_copy_num, coverage_threshold)
             else:
                 log.logger.info(output_dir + ' exists, skip...')
-                # log.logger.info(expand_output_dir + ' exists, skip...')
                 log.logger.info(full_length_output_dir + ' exists, skip...')
-            # output_dir = expand_output_dir
 
-            # 去掉某一侧侧翼窗口高度同源的，通常是 truncated 的终端或重复区。
-            temp_dir = tmp_output_dir + '/temp_sort'
-            keep_output_dir = output_dir + '_sort'
-            if not recover or not os.path.exists(keep_output_dir):
-                log.logger.debug('Homologous clustering LTR frames')
-                input_num, keep_num = sort_matrix_dir(output_dir, keep_output_dir, temp_dir, threads)
-                log.logger.debug('Input LTR num: ' + str(input_num) + ', keep LTR num: ' + str(keep_num))
-            else:
-                log.logger.info(keep_output_dir + ' exists, skip...')
-            output_dir = keep_output_dir
+            if is_flank_homo_cluster:
+                # 去掉某一侧侧翼窗口高度同源的，通常是 truncated 的终端或重复区。
+                temp_dir = tmp_output_dir + '/temp_sort'
+                keep_output_dir = output_dir + '_sort'
+                if not recover or not os.path.exists(keep_output_dir):
+                    log.logger.debug('Homologous clustering LTR frames')
+                    input_num, keep_num = sort_matrix_dir(output_dir, keep_output_dir, temp_dir, threads)
+                    log.logger.debug('Input LTR num: ' + str(input_num) + ', keep LTR num: ' + str(keep_num))
+                else:
+                    log.logger.info(keep_output_dir + ' exists, skip...')
 
-            # 过滤掉具有高度同源的连接后的两侧侧翼区域，通常是LTR插入到其他TE中转座导致两侧区域完全一致，或者干脆就是假阳性。
-            # 我们要求真实的LTR的随机序列要高于同源序列
-            temp_dir = tmp_output_dir + '/temp_flank_cluster'
-            keep_output_dir = output_dir + '_keep'
-            if not recover or not os.path.exists(keep_output_dir):
-                log.logger.debug('Homologous clustering flanking sequences of LTR')
-                filter_ltr_by_flanking_cluster(output_dir, keep_output_dir, temp_dir, threads, log)
-            else:
-                log.logger.info(keep_output_dir + ' exists, skip...')
-            output_dir = keep_output_dir
+                if not debug:
+                    os.system('rm -rf ' + output_dir)
+                    os.system('rm -rf ' + temp_dir)
 
+                output_dir = keep_output_dir
+
+            if is_flank_homo_cluster_both:
+                # 过滤掉具有高度同源的连接后的两侧侧翼区域，通常是LTR插入到其他TE中转座导致两侧区域完全一致，或者干脆就是假阳性。
+                # 我们要求真实的LTR的随机序列要高于同源序列
+                temp_dir = tmp_output_dir + '/temp_flank_cluster'
+                keep_output_dir = output_dir + '_keep'
+                if not recover or not os.path.exists(keep_output_dir):
+                    log.logger.debug('Homologous clustering flanking sequences of LTR')
+                    filter_ltr_by_flanking_cluster(output_dir, keep_output_dir, temp_dir, threads, log)
+                else:
+                    log.logger.info(keep_output_dir + ' exists, skip...')
+
+                if not debug:
+                    os.system('rm -rf ' + output_dir)
+                    os.system('rm -rf ' + temp_dir)
+
+                output_dir = keep_output_dir
 
             output_path = tmp_output_dir + '/is_LTR.txt'
             if file_exist(output_path):
@@ -471,12 +508,10 @@ if __name__ == '__main__':
                     get_low_copy_LTR(output_dir, low_copy_output_dir, copy_num_threshold=5)
 
                     type = 'Low copy'
-                    judge_ltr_from_both_ends_frame(low_copy_output_dir, lc_output_path, threads, type, log)
+                    judge_ltr_from_both_ends_frame(low_copy_output_dir, lc_output_path, threads, type, flanking_len, log)
 
-                    # # Step 3.2: Determine if the low-copy LTR possesses a 4-6 bp TSD.
-                    # log.logger.debug('Step 3.2: Determine if the low-copy LTR possesses a 4-6 bp TSD.')
-                    # judge_ltr_has_structure(lc_output_path, structure_output_path, leftLtr2Candidates, ltr_lines, reference, log)
-                    # # filter_ltr_by_structure_low_copy(lc_output_path, structure_output_path, leftLtr2Candidates, ltr_lines, reference, threads, log)
+                    if not debug:
+                        os.system('rm -rf ' + low_copy_output_dir)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 os.system('cat ' + lc_output_path + ' >> ' + output_path)
@@ -495,7 +530,7 @@ if __name__ == '__main__':
                 result_file = hc_output_path
                 if not recover or not file_exist(result_file):
                     type = 'High copy'
-                    judge_ltr_from_both_ends_frame(high_copy_output_dir, hc_output_path, threads, type, log)
+                    judge_ltr_from_both_ends_frame(high_copy_output_dir, hc_output_path, threads, type, flanking_len, log)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
 
@@ -516,16 +551,20 @@ if __name__ == '__main__':
 
             # 使用同源规则的结果对深度学习的预测结果进行调整
             alter_dl_output_path = tmp_output_dir + '/is_LTR_deep.alter.txt'
-            alter_deep_learning_results(dl_output_path, hc_output_path, alter_dl_output_path, log)
+            alter_deep_learning_results(dl_output_path, hc_output_path, alter_dl_output_path, high_copy_output_dir, log)
             # 合并 高 拷贝预测结果
             os.system('cat ' + alter_dl_output_path + ' >> ' + output_path)
+
+            if not debug:
+                os.system('rm -rf ' + high_copy_output_dir)
+                os.system('rm -rf ' + output_dir)
 
             if is_filter_TIR:
                 tir_output_path = tmp_output_dir + '/is_LTR_tir.txt'
                 result_file = tir_output_path
                 if not recover or not file_exist(result_file):
                     # Step 4.2 识别窗口两侧是否具有 TIR TSD特征，如果有超过10个拷贝有TSD特征，则认为是假阳性
-                    filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, full_length_flanking_len, log)
+                    filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, flanking_len, log, debug)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = tir_output_path
@@ -534,7 +573,7 @@ if __name__ == '__main__':
                 helitron_output_path = tmp_output_dir + '/is_LTR_helitron.txt'
                 result_file = helitron_output_path
                 if not recover or not file_exist(result_file):
-                    filter_helitron(output_path, helitron_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, project_dir, full_length_flanking_len, log)
+                    filter_helitron(output_path, helitron_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, project_dir, flanking_len, log, debug)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = helitron_output_path
@@ -544,73 +583,79 @@ if __name__ == '__main__':
                 result_file = sine_output_path
                 if not recover or not file_exist(result_file):
                     # Step 4.3 识别序列是否具有 SINE tail
-                    filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, full_length_flanking_len, log)
+                    filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, flanking_len, log, debug)
                 else:
                     log.logger.info(result_file + ' exists, skip...')
                 output_path = sine_output_path
 
-            # 我们要求完整的LTR必须具备 4-6 bp TSD，没有的话就认为是假阳性
-            # 由于初始的边界不一定准确，我们按照LTR_retriever的方法，取侧翼 8bp 和 5' end 3bp，共11bp，然后搜索4-6bp TSD，如果没有，再搜索TG CA，如果都没有就当作假阳性过滤
-            if is_use_structure:
-                structure_output_path = tmp_output_dir + '/is_LTR_structure.txt'
-                result_file = structure_output_path
-                if not recover or not file_exist(result_file):
-                    filter_ltr_by_structure(output_path, structure_output_path, leftLtr2Candidates, ltr_lines, reference, threads, log)
-                else:
-                    log.logger.info(result_file + ' exists, skip...')
-                output_path = structure_output_path
+            if not debug:
+                os.system('rm -rf ' + full_length_output_dir)
 
-            if is_filter_single:
-                intact_output_path = tmp_output_dir + '/intact_LTR_homo.txt'
-                result_file = intact_output_path
-                if not recover or not file_exist(intact_output_path):
-                    log.logger.info('Process LTRs with a full-length copy number <= 1')
-                    # filter_single_ltr(output_path, intact_output_path, leftLtr2Candidates, ltr_lines, reference, flanking_len, tmp_output_dir, split_ref_dir, threads, log)
-                    # is_ltr_has_structure, ltr_copies, internal_ltrs = filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, coverage_threshold, log)
-                    ltr_copies, internal_ltrs = filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, coverage_threshold, log)
+            # # 我们要求完整的LTR必须具备 4-6 bp TSD，没有的话就认为是假阳性
+            # # 由于初始的边界不一定准确，我们按照LTR_retriever的方法，取侧翼 8bp 和 5' end 3bp，共11bp，然后搜索4-6bp TSD，如果没有，再搜索TG CA，如果都没有就当作假阳性过滤
+            # if is_use_structure:
+            #     structure_output_path = tmp_output_dir + '/is_LTR_structure.txt'
+            #     result_file = structure_output_path
+            #     if not recover or not file_exist(result_file):
+            #         filter_ltr_by_structure(output_path, structure_output_path, leftLtr2Candidates, ltr_lines, reference, threads, log)
+            #     else:
+            #         log.logger.info(result_file + ' exists, skip...')
+            #     output_path = structure_output_path
 
-                    # 把ltr_copies存成文件
-                    ltr_copies_json = tmp_output_dir + '/ltr_copies.json'
-                    with open(ltr_copies_json, 'w', encoding='utf-8') as f:
-                        json.dump(ltr_copies, f, ensure_ascii=False, indent=4)
-
-                    # 处理单拷贝LTR。我们只保留具有 TSD 结构的单拷贝 且 内部具有完整protein的。
-                    lib_dir = project_dir + '/databases'
-                    ltr_protein_db = lib_dir + '/LTRPeps.lib'
-                    other_protein_db = lib_dir + '/OtherPeps.lib'
-                    # protein_db = lib_dir + '/RepeatPeps.lib'
-                    single_copy_internals_file = tmp_output_dir + '/single_copy_internal.fa'
-                    #filter_single_copy_ltr(intact_output_path, is_ltr_has_structure, single_copy_internals_file, ltr_copies, internal_ltrs, protein_db, tmp_output_dir, threads, log)
-                    filter_single_copy_ltr(intact_output_path, single_copy_internals_file, ltr_copies, internal_ltrs, ltr_protein_db, other_protein_db, tmp_output_dir, threads, reference, leftLtr2Candidates, ltr_lines, log)
-                else:
-                    log.logger.info(result_file + ' exists, skip...')
-                output_path = intact_output_path
-
-            # Step5. 过滤掉False positives
-            FP_ltrs = {}
-            true_ltrs = {}
-            with open(output_path, 'r') as f_r:
-                for line in f_r:
-                    line = line.replace('\n', '')
-                    parts = line.split('\t')
-                    ltr_name = parts[0]
-                    is_ltr = int(parts[1])
-                    if not is_ltr:
-                        FP_ltrs[ltr_name] = is_ltr
-                    else:
-                        true_ltrs[ltr_name] = is_ltr
-
-            confident_lines = []
-            for name in leftLtr2Candidates.keys():
-                # if name not in FP_ltrs:
-                if name in true_ltrs:
-                    candidate_index = leftLtr2Candidates[name]
-                    line = ltr_lines[candidate_index]
-                    confident_lines.append(line)
-            store_scn(confident_lines, confident_scn)
+            os.system('cat ' + output_path + ' > ' + confident_msa_file)
         else:
             log.logger.info(result_file + ' exists, skip...')
-        scn_file = confident_scn
+        output_path = confident_msa_file
+
+    if is_filter_single:
+        intact_output_path = tmp_output_dir + '/intact_LTR_homo.txt'
+        result_file = intact_output_path
+        if not recover or not file_exist(intact_output_path):
+            log.logger.info('Process LTRs with a full-length copy number <= 1')
+            ltr_copies, internal_ltrs = filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, coverage_threshold, debug)
+
+            if debug:
+                # 把ltr_copies存成文件
+                ltr_copies_json = tmp_output_dir + '/ltr_copies.json'
+                with open(ltr_copies_json, 'w', encoding='utf-8') as f:
+                    json.dump(ltr_copies, f, ensure_ascii=False, indent=4)
+
+            # 处理单拷贝LTR。我们只保留具有 TSD 结构的单拷贝 且 内部具有完整protein的。
+            lib_dir = project_dir + '/databases'
+            ltr_protein_db = lib_dir + '/LTRPeps.lib'
+            other_protein_db = lib_dir + '/OtherPeps.lib'
+            single_copy_internals_file = tmp_output_dir + '/single_copy_internal.fa'
+            filter_single_copy_ltr(intact_output_path, single_copy_internals_file, ltr_copies, internal_ltrs,
+                                   ltr_protein_db, other_protein_db, tmp_output_dir, threads, reference,
+                                   leftLtr2Candidates, ltr_lines, log, debug)
+        else:
+            log.logger.info(result_file + ' exists, skip...')
+        output_path = intact_output_path
+
+    # Step5. 过滤掉False positives
+    FP_ltrs = {}
+    true_ltrs = {}
+    with open(output_path, 'r') as f_r:
+        for line in f_r:
+            line = line.replace('\n', '')
+            parts = line.split('\t')
+            ltr_name = parts[0]
+            is_ltr = int(parts[1])
+            if not is_ltr:
+                FP_ltrs[ltr_name] = is_ltr
+            else:
+                true_ltrs[ltr_name] = is_ltr
+
+    confident_scn = tmp_output_dir + '/confident_ltr.scn'
+    confident_lines = []
+    for name in leftLtr2Candidates.keys():
+        # if name not in FP_ltrs:
+        if name in true_ltrs:
+            candidate_index = leftLtr2Candidates[name]
+            line = ltr_lines[candidate_index]
+            confident_lines.append(line)
+    store_scn(confident_lines, confident_scn)
+    scn_file = confident_scn
 
     confident_ltr_path = tmp_output_dir + '/confident_ltr.fa'
     result_file = confident_ltr_path
@@ -618,36 +663,26 @@ if __name__ == '__main__':
         # Step6. 生成LTR library
         confident_ltr_terminal = tmp_output_dir + '/confident_ltr.terminal.fa'
         confident_ltr_internal = tmp_output_dir + '/confident_ltr.internal.fa'
-        get_LTR_seq_from_scn(reference, scn_file, confident_ltr_terminal, confident_ltr_internal)
+        get_LTR_seq_from_scn(reference, scn_file, confident_ltr_terminal, confident_ltr_internal, dirty_dicts)
 
         confident_ltr_terminal_cons = confident_ltr_terminal + '.cons'
+
+        terminal_coverage_threshold = 0.95
         if is_deredundant:
             # Step7. Remove redundancy from the LTR terminal results.
             starttime = time.time()
             log.logger.info('Start step6: Remove LTR terminal redundancy')
             type = 'terminal'
             # 对于 terminal 而言，其内部不太可能出现太大的插入删除变异，因此我们只是利用已识别的LTR终端序列去冗余，不再获取拷贝支持
-            terminal_coverage_threshold = 0.95
-            deredundant_for_LTR(confident_ltr_terminal, tmp_output_dir, threads, type, terminal_coverage_threshold)
+            deredundant_for_LTR_v5(confident_ltr_terminal, tmp_output_dir, threads, type, terminal_coverage_threshold, debug)
             endtime = time.time()
             dtime = endtime - starttime
             log.logger.info("Running time of step6: %.8s s" % (dtime))
         else:
-            cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+            cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(terminal_coverage_threshold) \
                              + ' -G 0 -g 1 -A 80 -i ' + confident_ltr_terminal + ' -o ' + confident_ltr_terminal_cons + ' -T 0 -M 0'
             os.system(cd_hit_command + ' > /dev/null 2>&1')
         # rename_fasta(confident_ltr_terminal_cons, confident_ltr_terminal_cons, 'LTR_terminal')
-
-        if is_clean_internal:
-            # Step6.2 清理内部序列。大量的内部序列是由于其他类型的TE插入，或者干脆内部序列就是大量串联重复，我们需要排除这种影响。
-            log.logger.info('Start step7: Clean the internal sequences of LTRs by removing tandem repeats, LINEs, TIRs, and other elements (using proteins).')
-            clean_internal_command = 'python ' + src_dir + '/clean_LTR_internal.py ' \
-                                    + ' -t ' + str(threads) \
-                                    + ' --tmp_output_dir ' + tmp_output_dir \
-                                    + ' --internal_seq ' + confident_ltr_internal
-            log.logger.debug(clean_internal_command)
-            os.system(clean_internal_command)
-            confident_ltr_internal += '.clean'
 
         if is_remove_nested:
             # Step6.1 去内部嵌合 LTR 和 Helitron元素。
@@ -672,82 +707,54 @@ if __name__ == '__main__':
                 os.system(remove_nested_command)
                 confident_ltr_internal = clean_LTR_path
 
-        # # 将内部序列区分成高拷贝和低拷贝
-        # temp_dir = tmp_output_dir + '/internal_blast_temp'
-        # max_copy_num = 10
-        # all_copies = get_full_length_copies_batch_v1(confident_ltr_internal, split_ref_dir, threads, temp_dir, max_copy_num, coverage_threshold)
-        # confident_internal_names, confident_internal_contigs = read_fasta(confident_ltr_internal)
-        # low_copy_ltr_internal = confident_ltr_internal + '.low_copy'
-        # low_copy_internal_contigs = {}
-        # high_copy_internal_contigs = {}
-        # for name in all_copies.keys():
-        #     if len(all_copies[name]) < 5:
-        #         low_copy_internal_contigs[name] = confident_internal_contigs[name]
-        #     else:
-        #         high_copy_internal_contigs[name] = confident_internal_contigs[name]
-        # store_fasta(low_copy_internal_contigs, low_copy_ltr_internal)
-        #
-        # # 判断低拷贝内部序列是否具有蛋白质
-        # output_table = low_copy_ltr_internal + '.domain'
-        # temp_dir = tmp_output_dir + '/domain'
-        # lib_dir = project_dir + '/databases'
-        # protein_db = lib_dir + '/LTRPeps.lib'
-        # get_domain_info(low_copy_ltr_internal, protein_db, output_table, threads, temp_dir)
-        #
-        # is_low_copy_has_intact_protein = {}
-        # protein_names, protein_contigs = read_fasta(protein_db)
-        # with open(output_table, 'r') as f_r:
-        #     for i, line in enumerate(f_r):
-        #         if i < 2:
-        #             continue
-        #         parts = line.split('\t')
-        #         te_name = parts[0]
-        #         protein_name = parts[1]
-        #         protein_start = int(parts[4])
-        #         protein_end = int(parts[5])
-        #         intact_protein_len = len(protein_contigs[protein_name])
-        #         if float(abs(protein_end - protein_start)) / intact_protein_len >= 0.95:
-        #             is_low_copy_has_intact_protein[te_name] = True
-        #
-        # confident_ltr_internal += '.confident'
-        # filtered_internal_count = 0
-        # for name in low_copy_internal_contigs.keys():
-        #     if name in is_low_copy_has_intact_protein and is_low_copy_has_intact_protein[name]:
-        #         high_copy_internal_contigs[name] = low_copy_internal_contigs[name]
-        #     else:
-        #         filtered_internal_count += 1
-        # store_fasta(high_copy_internal_contigs, confident_ltr_internal)
-        # log.logger.info('Filter un-reliable low copy LTR internals: ' + str(filtered_internal_count))
+        if is_clean_internal:
+            # Step6.2 清理内部序列。大量的内部序列是由于其他类型的TE插入，或者干脆内部序列就是大量串联重复，我们需要排除这种影响。
+            log.logger.info('Start step7: Clean the internal sequences of LTRs by removing tandem repeats, LINEs, TIRs, and other elements (using proteins).')
+            clean_internal_command = 'python ' + src_dir + '/clean_LTR_internal.py ' \
+                                    + ' -t ' + str(threads) \
+                                    + ' --tmp_output_dir ' + tmp_output_dir \
+                                    + ' --internal_seq ' + confident_ltr_internal
+            log.logger.debug(clean_internal_command)
+            os.system(clean_internal_command)
+            confident_ltr_internal += '.clean'
 
         confident_ltr_internal_cons = confident_ltr_internal + '.cons'
+        internal_coverage_threshold = 0.8
         if is_deredundant:
             # Step7. Remove redundancy from the LTR internal results.
             starttime = time.time()
             log.logger.info('Start step6: Remove LTR internal redundancy')
             type = 'internal'
             # 对于 internal 而言，其内部可能出现较大的插入删除变异，因此我们要求比较宽松的0.8阈值
-            internal_coverage_threshold = 0.8
-            deredundant_for_LTR(confident_ltr_internal, tmp_output_dir, threads, type, internal_coverage_threshold)
-            # deredundant_for_LTR_v1(confident_ltr_internal, tmp_output_dir, reference, split_ref_dir, threads,
-            #                        internal_coverage_threshold, type)
+            deredundant_for_LTR_v5(confident_ltr_internal, tmp_output_dir, threads, type, internal_coverage_threshold, debug)
             endtime = time.time()
             dtime = endtime - starttime
             log.logger.info("Running time of step6: %.8s s" % (dtime))
         else:
-            cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+            cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(internal_coverage_threshold) \
                              + ' -G 0 -g 1 -A 80 -i ' + confident_ltr_internal + ' -o ' + confident_ltr_internal_cons + ' -T 0 -M 0'
             os.system(cd_hit_command + ' > /dev/null 2>&1')
         # rename_fasta(confident_ltr_internal_cons, confident_ltr_internal_cons, 'LTR_internal')
 
         # Step8. 生成一致性library
         os.system('cat ' + confident_ltr_terminal_cons + ' ' + confident_ltr_internal_cons + ' > ' + confident_ltr_path)
+
+        if not debug:
+            confident_ltr_terminal = tmp_output_dir + '/confident_ltr.terminal.fa'
+            confident_ltr_internal = tmp_output_dir + '/confident_ltr.internal.fa'
+            os.system('rm -f ' + confident_ltr_terminal + '*')
+            os.system('rm -f ' + confident_ltr_internal + '*')
     else:
         log.logger.info(result_file + ' exists, skip...')
 
     # Step9. 调用评估方法
     evaluation_command = 'cd ' + project_dir + ' && python ' + src_dir + '/benchmarking.py --BM_RM2 ' + str(BM_RM2) + ' --BM_EDTA ' + str(BM_EDTA) + ' --BM_HiTE ' + str(BM_HiTE) + ' -t ' + \
                       str(threads) + ' --TE_lib ' + confident_ltr_path + ' -r ' + reference + \
-                      ' --EDTA_home ' + str(EDTA_home) + ' --species ' + species + ' --tmp_output_dir ' + tmp_output_dir + ' --recover ' + str(recover)
+                      ' --tmp_output_dir ' + tmp_output_dir + ' --recover ' + str(recover)
+    if EDTA_home is not None and EDTA_home != '':
+        evaluation_command += ' --EDTA_home ' + EDTA_home
+    if species is not None:
+        evaluation_command += ' --species ' + species
     log.logger.debug(evaluation_command)
     os.system(evaluation_command)
 

@@ -4,13 +4,12 @@ channels:
   - bioconda
   - anaconda
   - defaults
+  - pytorch
 dependencies:
   - python=3.8.16=h7a1cb2a_2
   - java-jdk
-  - cudatoolkit=11.3.1=h2bc3f7f_2
-  - cudnn=8.2.1.32=h86fa8c9_0
-  - tensorflow=2.6.0
-  - keras=2.6.0=pyhd3eb1b0_0
+  - pytorch
+  - cpuonly
   - numpy=1.19.5
   - biopython=1.78=py38h7f8727e_0
   - scikit-learn=1.2.0=py38h6a678d5_1
@@ -25,6 +24,7 @@ dependencies:
   - mafft
   - ninja-nj
   - emboss
+  - tqdm
   - pip
   - pip:
     - python-Levenshtein

@@ -58,4 +58,4 @@ awk '
     print $0
 }' $OUTPUT.orftetable.with_len.sorted > $OUTPUT.orftetable.clean
 
-# rm $OUTPUT.TE.orfs $OUTPUT.TE.orfs.R $OUTPUT.TE.blastp.out $OUTPUT.file1 $OUTPUT.file2 $OUTPUT.orftetable $OUTPUT.orftetable.with_len $OUTPUT.orftetable.with_len.sorted
+rm $OUTPUT.TE.orfs $OUTPUT.TE.orfs.R $OUTPUT.TE.blastp.out $OUTPUT.file1 $OUTPUT.file2 $OUTPUT.orftetable $OUTPUT.orftetable.with_len $OUTPUT.orftetable.with_len.sorted

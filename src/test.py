@@ -31,7 +31,7 @@ from utils.data_util import read_fasta, store_fasta, read_fasta_v1, replace_non_
     transfer_RMOut2Bed, generate_random_sequences, generate_random_sequence, word_seq, generate_kmer_list, \
     cluster_sequences, generate_random_sequence_v1, generate_expand_matrix, find_files_recursively, \
     split_list_into_groups, expand_matrix_dir, get_matrix_feature_v3, generate_kmer_dic, expand_matrix_dir_v1, \
-    get_domain_info, generate_sort_matrix
+    generate_sort_matrix
 from utils.evaluate_util import generate_TERL_dataset, generate_ClassifyTE_dataset, evaluate_RepeatClassifier, \
     evaluate_TERL, evaluate_DeepTE, transform_DeepTE_to_fasta, add_ClassifyTE_classification, evaluate_ClassifyTE, \
     evaluate_TEsorter, merge_overlapping_intervals, get_metrics_by_label, plot_3D_param, analyze_class_ratio_gff
@@ -43,7 +43,10 @@ from Util import judge_both_ends_frame_v1, filter_ltr_by_homo, multi_process_ali
     random_downsample, find_tir_in_ltr, get_full_length_copies_batch, multi_process_align_v3, \
     judge_ltr_from_both_ends_frame, generate_both_ends_frame_for_intactLTR, multi_process_align, judge_both_ends_frame, \
     get_full_length_copies, filter_ltr_by_flank_seq_v1, get_full_length_copies_v1, map_fragment, get_intact_ltr_copies, \
-    get_confident_TIR_v1, get_copies_v2, get_domain_info_v1, get_domain_info_v2, remove_copies_from_redundant_contig
+    get_confident_TIR_v1, get_copies_v2, get_domain_info_v1, get_domain_info_v2, remove_copies_from_redundant_contig, \
+    remove_copies_from_redundant_contig_v1, is_ltr_has_structure, judge_scn_line_by_flank_seq_v1, \
+    judge_scn_line_by_flank_seq_v2, deredundant_for_LTR_v5, get_ltr_from_line, get_all_potential_ltr_lines, \
+    multi_process_align_v1, filter_ltr_by_copy_num_sub
 from clean_LTR_internal import purge_internal_seq, purge_internal_seq_by_table
 
 
@@ -399,7 +402,7 @@ def get_mask_regions(std_out):
 
 def BM_EDTA():
     # 自己编写程序，尝试获得和BM_EDTA一致的结果
-    work_dir = '/home/hukang/HybridLTR-main/demo/zebrafish'
+    work_dir = '/home/hukang/HybridLTR/demo/zebrafish'
     genome = work_dir + '/genome.rename.fa'
     std_out = work_dir + '/repbase.edta.out'
     test_out = work_dir + '/HiTE.edta.out'
@@ -539,7 +542,7 @@ def BM_EDTA():
 
 def BM_HiTE():
     # 统计一下哪些序列贡献的FP最多
-    work_dir = '/home/hukang/LTR_Benchmarking/LTR_libraries/Ours/maize'
+    work_dir = '/home/hukang/HybridLTR/demo/rice_high_FP'
     FP_file = work_dir + '/FP.blastn.out'
     FP_count = {}
     with open(FP_file, 'r') as f_r:
@@ -562,11 +565,33 @@ def BM_HiTE():
         for key, value in sorted_FP_count:
             file.write(f"{key}: {value}\n")
 
+    FN_file = work_dir + '/FN.blastn.out'
+    FN_count = {}
+    with open(FN_file, 'r') as f_r:
+        for line in f_r:
+            parts = line.split('\t')
+            seq_name = parts[0]
+            chr_start = int(parts[2])
+            chr_end = int(parts[3])
+            cover_len = abs(chr_end - chr_start)
+            if seq_name not in FN_count:
+                FN_count[seq_name] = 0
+            cur_cover_len = FN_count[seq_name]
+            cur_cover_len += cover_len
+            FN_count[seq_name] = cur_cover_len
+    sorted_FN_count = sorted(FN_count.items(), key=lambda item: -item[1])
+
+    file_path = work_dir + '/sorted_FN_count.txt'
+    # 将排序后的结果写入文件
+    with open(file_path, 'w') as file:
+        for key, value in sorted_FN_count:
+            file.write(f"{key}: {value}\n")
 
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.backends import default_backend
+
+# from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+# from cryptography.hazmat.primitives import padding
+# from cryptography.hazmat.backends import default_backend
 import os
 
 # 固定密钥和初始化向量
@@ -661,8 +686,141 @@ if __name__ == '__main__':
     # # get_domain_info(internal_seq_filter, line_db, output_table, threads, temp_dir)
     # purge_internal_seq_by_table(internal_seq_filter, line_db, clean_internal_seq, output_table)
 
-    BM_EDTA()
+    # BM_EDTA()
     # BM_HiTE()
+
+    reference = '/home/hukang/HybridLTR/demo/GCF_001433935.1_IRGSP-1.0_genomic.rename.fna'
+    tmp_output_dir = '/home/hukang/HybridLTR/demo/rice_high_FP'
+    threads = 40
+    split_ref_dir = tmp_output_dir + '/ref_chr'
+    full_length_threshold = 0.95
+    confident_lines = [('chr_0:1524180-1531026', '1524180 1531026 6847 1524180 1524621 442 1530585 1531026 442 98.9 12 chr_0')]
+
+
+    internal_ltrs = {}
+    intact_ltrs = {}
+    intact_ltr_path = tmp_output_dir + '/intact_ltr.fa'
+    ref_names, ref_contigs = read_fasta(reference)
+    for name, line in confident_lines:
+        parts = line.split(' ')
+        chr_name = parts[11]
+        left_ltr_start = int(parts[3])
+        left_ltr_end = int(parts[4])
+        right_ltr_start = int(parts[6])
+        right_ltr_end = int(parts[7])
+
+        ref_seq = ref_contigs[chr_name]
+
+        intact_ltr_seq = ref_seq[left_ltr_start - 1: right_ltr_end]
+        internal_ltr_seq = ref_seq[left_ltr_end: right_ltr_start - 1]
+        internal_ltrs[name] = internal_ltr_seq
+        if len(intact_ltr_seq) > 0:
+            intact_ltrs[name] = intact_ltr_seq
+    store_fasta(intact_ltrs, intact_ltr_path)
+
+    temp_dir = tmp_output_dir + '/intact_ltr_filter'
+    ltr_copies = filter_ltr_by_copy_num_sub(intact_ltr_path, threads, temp_dir, split_ref_dir, full_length_threshold,
+                                            max_copy_num=10)
+    print(ltr_copies)
+
+
+
+
+    # work_dir = '/home/hukang/HybridLTR/demo/rice_high_FP'
+    # genome_path = work_dir + '/genome.rename.fa'
+    # test_lib = work_dir + '/test.fa'
+    # # test_lib = work_dir + '/confident_ltr.fa'
+    # test_tmp_blast_dir = work_dir + '/test_blastn'
+    # test_lib_out = work_dir + '/test_full_length.out'
+    # thread = 40
+    #
+    # names, contigs = read_fasta(genome_path)
+    # chrom_length = {}
+    # for i, name in enumerate(names):
+    #     chr_len = len(contigs[name])
+    #     chrom_length[name] = chr_len
+    #
+    # coverage_threshold = 0.95
+    # category = 'Total'
+    # is_full_length = 1
+    # multi_process_align_v1(test_lib, genome_path, test_lib_out, test_tmp_blast_dir, thread, chrom_length,
+    #                        coverage_threshold, category, is_full_length, is_removed_dir=False)
+
+
+
+    # # # 测试内部序列去冗余能否解决玉米的问题
+    # tmp_output_dir = '/home/hukang/HybridLTR/demo/maize'
+    # reference = tmp_output_dir + '/GCF_902167145.1_Zm-B73-REFERENCE-NAM-5.0_genomic.rename.fna'
+    # scn_file = tmp_output_dir + '/confident_ltr.scn'
+    # dirty_dicts = {}
+    #
+    # confident_ltr_terminal = tmp_output_dir + '/confident_ltr.terminal.fa'
+    # confident_ltr_internal = tmp_output_dir + '/confident_ltr.internal.fa'
+    # # get_LTR_seq_from_scn(reference, scn_file, confident_ltr_terminal, confident_ltr_internal, dirty_dicts)
+    #
+    # type = 'internal'
+    # threads = 40
+    # internal_coverage_threshold = 0.8
+    # deredundant_for_LTR_v5(confident_ltr_internal, tmp_output_dir, threads, type, internal_coverage_threshold)
+
+    # test1_out = tmp_output_dir + '/chr_7_83450278-83457709-int.out'
+    # test2_out = tmp_output_dir + '/chr_9_55186310-55193461-int.out'
+    # test1_set = set()
+    # test2_set = set()
+    # with open(test1_out, 'r') as f_r:
+    #     for line in f_r:
+    #         parts = line.split('\t')
+    #         query_name = parts[0]
+    #         subject_name = parts[1]
+    #         if query_name == subject_name:
+    #             continue
+    #         test1_set.add(query_name)
+    #         test1_set.add(subject_name)
+    #
+    # with open(test2_out, 'r') as f_r:
+    #     for line in f_r:
+    #         parts = line.split('\t')
+    #         query_name = parts[0]
+    #         subject_name = parts[1]
+    #         if query_name == subject_name:
+    #             continue
+    #         test2_set.add(query_name)
+    #         test2_set.add(subject_name)
+    #
+    # intersection = test1_set.intersection(test2_set)
+    # print(intersection)
+
+    # work_dir = '/home/hukang/HybridLTR/demo/rice_high_FP'
+    # reference = '/home/hukang/HybridLTR/demo/GCF_001433935.1_IRGSP-1.0_genomic.rename.fna'
+    # ref_names, ref_contigs = read_fasta(reference)
+
+    # scn_file = work_dir + '/remove_recomb.scn'
+    # # scn_file = work_dir + '/test.scn'
+    # ltr_candidates, ltr_lines = read_scn(scn_file, log=None, remove_dup=True)
+    #
+    # confident_lines = []
+    # for candidate_index in ltr_lines.keys():
+    #     confident_lines.append(ltr_lines[candidate_index])
+    #
+    # threads = 40
+    # temp_path = work_dir + '/all_potential_ltr.json'
+    # new_confident_lines = get_all_potential_ltr_lines(confident_lines, reference, threads, temp_path, log=None)
+    # # print(new_confident_lines)
+
+
+    # candidate_index = 0
+    # line = '1258001 1264025 6025 1258001 1258445 445 1263582 1264025 444 97.0 NA chr_0'
+    # #line = '64181422 64192039 10618 64181422 64181595 174 64191866 64192039 174 98.0 NA Chr426 '
+    # parts = line.split(' ')
+    # chr_name = parts[11]
+    # ref_seq = ref_contigs[chr_name]
+    # extend_len = 50
+    # left_ltr = ref_seq[1258001 - extend_len: 1258445 + extend_len]
+    # right_ltr = ref_seq[1263582 - extend_len: 1264025 + extend_len]
+    # job_list = [(candidate_index, left_ltr, right_ltr, 445, 444, 1258001, 1258445, 1263582, 1264025)]
+    # results = judge_scn_line_by_flank_seq_v2(job_list)
+    # print(results)
+
 
     # # 过滤来自冗余contig的拷贝，即取拷贝的左侧100bp+右侧100bp组成的序列仍然能够很好比对
     # work_dir = '/home/hukang/HybridLTR-main/demo/zebrafish'
@@ -676,13 +834,19 @@ if __name__ == '__main__':
     # # copies = [copy1, copy2]
     # # intact_ltr_copies['chr_12-880068-880443'] = copies
     #
-    # copy1 = ('Chr349', 199084, 220908)
-    # copy2 = ('Chr431', 66061484, 66083654)
+    # # copy1 = ('Chr349', 199084, 220908)
+    # # copy2 = ('Chr431', 66061484, 66083654)
+    # # copies = [copy1, copy2]
+    # # intact_ltr_copies['chr_1246-199085-199697'] = copies
+    #
+    # copy1 = ('Chr358', 152302, 173068)
+    # copy2 = ('Chr307', 8124643, 8145856)
     # copies = [copy1, copy2]
-    # intact_ltr_copies['chr_1246-199085-199697'] = copies
+    # intact_ltr_copies['chr_1395-152303-152654'] = copies
+    #
     # temp_dir = work_dir + '/intact_ltr_deredundant'
     # threads= 40
-    # intact_ltr_copies = remove_copies_from_redundant_contig(intact_ltr_copies, reference, temp_dir, threads)
+    # intact_ltr_copies = remove_copies_from_redundant_contig_v1(intact_ltr_copies, reference, temp_dir, threads)
     # print(intact_ltr_copies)
 
 
@@ -729,16 +893,16 @@ if __name__ == '__main__':
     #         print(ltr_name)
     #     intact_ltr_copies[ltr_name] = filtered_copies
 
-    # work_dir = '/home/hukang/HybridLTR-main/demo/rice'
-    # single_copy_internals_file = work_dir + '/chr_5_25085532-25094316-int.fa'
-    # protein_db = '/home/hukang/HybridLTR-main/databases/LTRPeps.lib'
+    # work_dir = '/home/hukang/HybridLTR/demo/test_ath3'
+    # single_copy_internals_file = work_dir + '/chr_2-13561769-13562356.fa'
+    # protein_db = '/home/hukang/HybridLTR/databases/RepeatPeps.lib'
     # threads = 40
     # temp_dir = work_dir + '/domain'
-    # tool_dir = '/home/hukang/HybridLTR-main/tools'
+    # tool_dir = '/home/hukang/HybridLTR/tools'
     # query_protein_types = get_domain_info_v2(single_copy_internals_file, protein_db, threads, temp_dir, tool_dir)
     # print(query_protein_types)
     #
-    # name = 'chr_3-18315270-18315465'
+    # name = 'chr_2-13561769-13562356'
     # # 如果单拷贝LTR的内部序列有蛋白质、且蛋白质类型单一就认为是真实的LTR
     # # if name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name]:
     # if name in query_protein_types:
@@ -750,6 +914,7 @@ if __name__ == '__main__':
     #         cur_is_ltr = 0
     # else:
     #     cur_is_ltr = 0
+    # print(cur_is_ltr)
 
     # work_dir = '/home/hukang/HybridLTR-main/demo/test_ath27'
     # single_copy_internals_file = work_dir + '/single_copy_internal.fa'

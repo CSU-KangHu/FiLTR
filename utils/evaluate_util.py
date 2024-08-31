@@ -15,9 +15,9 @@ from scipy.interpolate import griddata, interpolate
 from configs import config
 from utils.data_util import read_fasta_v1, store_fasta, read_fasta, transfer_RMOut2BlastnOut
 
-import tensorflow as tf
+# import tensorflow as tf
 
-from keras import backend as K
+# from keras import backend as K
 def focal_loss(gamma=2.):
     def focal_loss_fixed(y_true, y_pred):
         pt_1 = tf.where(tf.equal(y_true, 1), y_pred, tf.ones_like(y_pred))

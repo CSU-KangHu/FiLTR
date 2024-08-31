@@ -13,7 +13,7 @@ sys.path.append(configs_folder)
 from configs import config
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from utils.data_util import read_fasta_v1, generate_TSD_info, generate_domain_info, generate_terminal_info, \
+from utils.data_util import read_fasta_v1, generate_TSD_info, generate_terminal_info, \
     load_repbase_with_TSD, generate_feature_mats, read_fasta, connect_LTR, store_fasta, generate_minority_info, \
     generate_predict_feature_mats, generate_feature_mats_hybrid, generate_predict_feature_mats_hybrid
 

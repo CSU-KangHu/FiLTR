@@ -856,9 +856,9 @@ def generate_left_frame_from_seq(candidate_sequence_path, reference, threads, te
     dtime = endtime - starttime
     return all_left_frames
 
-def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanking_len, full_length_flanking_len,
+def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanking_len,
                                       threads, temp_dir, output_dir, full_length_output_dir, split_ref_dir,
-                                      max_copy_num, full_length_threshold,):
+                                      max_copy_num, full_length_threshold):
     debug = 0
     starttime = time.time()
     if os.path.exists(temp_dir):
@@ -910,8 +910,6 @@ def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanki
     # extend copies
     batch_member_files = []
     new_all_copies = {}
-    full_length_batch_member_files = []
-    full_length_new_all_copies = {}
     for query_name in all_copies.keys():
         copies = all_copies[query_name]
         for copy in copies:
@@ -933,47 +931,35 @@ def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanki
             copy_contigs = new_all_copies[query_name]
             copy_contigs[new_name] = copy_seq
             new_all_copies[query_name] = copy_contigs
-
-            if copy_ref_start - 1 - full_length_flanking_len < 0 or copy_ref_end + full_length_flanking_len > len(ref_contigs[ref_name]):
-                continue
-            full_length_copy_seq = ref_contigs[ref_name][copy_ref_start - 1 - full_length_flanking_len: copy_ref_end + full_length_flanking_len]
-            if direct == '-':
-                full_length_copy_seq = getReverseSequence(full_length_copy_seq)
-            if len(full_length_copy_seq) < 100 or len(full_length_copy_seq) > 2000:
-                continue
-            new_name = ref_name + ':' + str(copy_ref_start) + '-' + str(copy_ref_end) + '-full_length(' + direct + ')'
-            if not full_length_new_all_copies.__contains__(query_name):
-                full_length_new_all_copies[query_name] = {}
-            full_length_copy_contigs = full_length_new_all_copies[query_name]
-            full_length_copy_contigs[new_name] = full_length_copy_seq
-            full_length_new_all_copies[query_name] = full_length_copy_contigs
     for query_name in new_all_copies.keys():
         copy_contigs = new_all_copies[query_name]
         cur_member_file = temp_dir + '/' + query_name + '.blast.bed.fa'
         store_fasta(copy_contigs, cur_member_file)
+        batch_member_files.append((query_name, cur_member_file))
 
-        cur_full_length_member_file = None
-        if query_name in full_length_new_all_copies:
-            full_length_copy_contigs = full_length_new_all_copies[query_name]
-            cur_full_length_member_file = temp_dir + '/' + query_name + '.full_length.blast.bed.fa'
-            store_fasta(full_length_copy_contigs, cur_full_length_member_file)
+    endtime = time.time()
+    dtime = endtime - starttime
+    print("Running time of get copies: %.8s s" % (dtime))
 
-        batch_member_files.append((query_name, cur_member_file, cur_full_length_member_file))
-
+    starttime = time.time()
     # subset_script_path = config.project_dir + '/tools/ready_for_MSA.sh'
     # Determine whether the multiple sequence alignment of each copied file satisfies the homology rule
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for batch_member_file in batch_member_files:
-        job = ex.submit(generate_msa, batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, full_length_flanking_len, debug)
+        job = ex.submit(generate_msa, batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, debug)
         jobs.append(job)
     ex.shutdown(wait=True)
 
     for job in as_completed(jobs):
         left_frame_path = job.result()
 
+    if not debug:
+        os.system('rm -rf ' + temp_dir)
+
     endtime = time.time()
     dtime = endtime - starttime
+    print("Running time of MSA: %.8s s" % (dtime))
 
 
 def generate_both_ends_frame_for_intactLTR(candidate_sequence_path, reference, flanking_len, threads, temp_dir,
@@ -1141,8 +1127,8 @@ def extract_copies(member_file, max_num):
     store_fasta(new_contigs, member_file)
     return member_file
 
-def generate_msa(batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, full_length_flanking_len, debug):
-    (query_name, member_file, full_length_member_file) = batch_member_file
+def generate_msa(batch_member_file, temp_dir, output_dir, full_length_output_dir, flanking_len, debug):
+    (query_name, member_file) = batch_member_file
 
     member_names, member_contigs = read_fasta(member_file)
     if len(member_names) > 100:
@@ -1156,32 +1142,10 @@ def generate_msa(batch_member_file, temp_dir, output_dir, full_length_output_dir
     os.system(align_command)
     # left_frame_path = get_left_frame(query_name, cur_seq, align_file, output_dir, debug)
     if len(member_names) >= 1:
-        # cur_seq = member_contigs[member_names[0]][flanking_len:-flanking_len]
-        # both_end_frame_path, full_length_align_file = get_both_ends_frame(query_name, cur_seq, align_file, output_dir, full_length_output_dir, flanking_len, debug)
-
         cur_seq = member_contigs[member_names[0]][flanking_len:-flanking_len]
-        both_end_frame_path = get_both_ends_frame_v1(query_name, cur_seq, align_file, output_dir, flanking_len, debug)
+        both_end_frame_path, full_length_align_file  = get_both_ends_frame(query_name, cur_seq, align_file, output_dir, full_length_output_dir, flanking_len, debug)
     else:
         both_end_frame_path = ''
-
-    if full_length_member_file is not None:
-        full_length_member_names, full_length_member_contigs = read_fasta(full_length_member_file)
-        if len(full_length_member_names) > 100:
-            # 抽取100条最长的 拷贝
-            max_num = 100
-            full_length_member_file = extract_copies(full_length_member_file, max_num)
-        if not os.path.exists(full_length_member_file):
-            return None, None
-        full_length_align_file = full_length_member_file + '.maf.fa'
-        align_command = 'cd ' + temp_dir + ' && mafft --preservecase --quiet --thread 1 ' + full_length_member_file + ' > ' + full_length_align_file
-        os.system(align_command)
-        # left_frame_path = get_left_frame(query_name, cur_seq, align_file, output_dir, debug)
-        if len(full_length_member_names) >= 1:
-            cur_seq = full_length_member_contigs[full_length_member_names[0]][full_length_flanking_len:-full_length_flanking_len]
-            full_length_align_file = get_both_ends_frame_v2(query_name, cur_seq, full_length_align_file, full_length_output_dir,
-                                                            full_length_flanking_len, debug)
-        else:
-            full_length_align_file = ''
     return both_end_frame_path
 
 
@@ -3893,41 +3857,96 @@ def generate_LTR_terminal_info(data_path, work_dir, tool_dir, threads):
     return cur_update_path
 
 # Parse output of LTR_harvest
-def get_LTR_seq_from_scn(genome, scn_path, ltr_terminal, ltr_internal):
+def get_LTR_seq_from_scn(genome, scn_path, ltr_terminal, ltr_internal, dirty_dicts, coverage_threshold=0.95):
     ref_names, ref_contigs = read_fasta(genome)
-    LTR_terminals = {}
-    LTR_ints = {}
+    ltr_lines = []
     with open(scn_path, 'r') as f_r:
         for i, line in enumerate(f_r):
             if line.startswith('#'):
                 continue
             else:
                 line = line.replace('\n', '')
-                parts = line.split(' ')
-                LTR_start = int(parts[0])
-                LTR_end = int(parts[1])
-                chr_name = parts[11]
-                lLTR_start = int(parts[3])
-                lLTR_end = int(parts[4])
-                rLTR_start = int(parts[6])
-                rLTR_end = int(parts[7])
-                lLTR_seq = ref_contigs[chr_name][lLTR_start-1: lLTR_end]
-                rLTR_seq = ref_contigs[chr_name][rLTR_start - 1: rLTR_end]
-                LTR_int_seq = ref_contigs[chr_name][lLTR_end: rLTR_start - 1]
-                if len(lLTR_seq) > 0 and len(rLTR_seq) > 0 and len(LTR_int_seq) > 0 and 'NNNNNNNNNN' not in lLTR_seq and 'NNNNNNNNNN' not in rLTR_seq and 'NNNNNNNNNN' not in LTR_int_seq:
-                    # LTR_seq = ref_contigs[chr_name][LTR_start-1: LTR_end]
-                    # LTR_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '#LTR'
-                    lLTR_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-lLTR' + '#LTR'
-                    LTR_terminals[lLTR_name] = lLTR_seq
-                    LTR_int_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-int' + '#LTR'
-                    LTR_ints[LTR_int_name] = LTR_int_seq
-                    rLTR_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-rLTR' + '#LTR'
-                    LTR_terminals[rLTR_name] = rLTR_seq
+                ltr_lines.append(line)
     f_r.close()
 
+    deredundant_lines = []
+    redundant_index = set()
+    # 去除坐标重复的LTR
+    for i in range(len(ltr_lines) - 1):
+        if i in redundant_index:
+            continue
+        cur_line = ltr_lines[i]
+        parts = cur_line.split(' ')
+        chr_name = parts[11]
+        chr_start = int(parts[3]) - 1
+        chr_end = int(parts[7])
+        cur_frag = (chr_start, chr_end)
+        for j in range(i+1, len(ltr_lines)):
+            next_line = ltr_lines[j]
+            parts = next_line.split(' ')
+            next_chr_name = parts[11]
+            next_chr_start = int(parts[3]) - 1
+            next_chr_end = int(parts[7])
+            next_frag = (next_chr_start, next_chr_end)
+            overlap_len = get_overlap_len(next_frag, cur_frag)
+            if (next_chr_name == chr_name
+                    and overlap_len / abs(next_frag[1] - next_frag[0]) >= coverage_threshold
+                    and overlap_len / abs(cur_frag[1] - cur_frag[0]) >= coverage_threshold):
+                redundant_index.add(j)
+            else:
+                break
+        deredundant_lines.append(cur_line)
+    # print(len(ltr_lines), len(deredundant_lines))
+
+    LTR_terminals = {}
+    LTR_ints = {}
+    for line in deredundant_lines:
+        parts = line.split(' ')
+        LTR_start = int(parts[0])
+        LTR_end = int(parts[1])
+        chr_name = parts[11]
+        lLTR_start = int(parts[3])
+        lLTR_end = int(parts[4])
+        rLTR_start = int(parts[6])
+        rLTR_end = int(parts[7])
+        lLTR_seq = ref_contigs[chr_name][lLTR_start - 1: lLTR_end]
+        rLTR_seq = ref_contigs[chr_name][rLTR_start - 1: rLTR_end]
+        LTR_int_seq = ref_contigs[chr_name][lLTR_end: rLTR_start - 1]
+
+        cur_name = chr_name + '-' + str(lLTR_start) + '-' + str(lLTR_end)
+        if (len(lLTR_seq) > 0 and len(rLTR_seq) > 0 and len(LTR_int_seq) > 0
+                and 'NNNNNNNNNN' not in lLTR_seq and 'NNNNNNNNNN' not in rLTR_seq and 'NNNNNNNNNN' not in LTR_int_seq):
+            lLTR_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-lLTR' + '#LTR'
+            LTR_terminals[lLTR_name] = lLTR_seq
+            rLTR_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-rLTR' + '#LTR'
+            LTR_terminals[rLTR_name] = rLTR_seq
+            # 如果当前是dirty (内部序列包含其他full-length LTR)，就过滤该内部序列
+            if cur_name not in dirty_dicts:
+                LTR_int_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-int' + '#LTR'
+                LTR_ints[LTR_int_name] = LTR_int_seq
     store_fasta(LTR_ints, ltr_internal)
     store_fasta(LTR_terminals, ltr_terminal)
 
+
+
+def merge_intervals(intervals):
+    # 如果列表为空，直接返回空列表
+    if not intervals:
+        return []
+    # 按照 start 值对 intervals 进行排序
+    intervals.sort(key=lambda x: x[0])
+    # 初始化合并后的区间列表
+    merged = [intervals[0]]
+    for current in intervals:
+        # 获取上一个合并后的区间
+        last = merged[-1]
+        # 如果当前区间与上一个区间重叠或相邻，合并它们
+        if current[0] <= last[1]:
+            merged[-1] = (last[0], max(last[1], current[1]))
+        else:
+            # 否则，添加当前区间
+            merged.append(current)
+    return merged
 
 def get_overlap_len(seq1, seq2):
     """Calculate the overlap length between two sequences."""
@@ -4049,6 +4068,9 @@ def multi_process_align_v1(query_path, subject_path, blastnResults_path, tmp_bla
                     seq_name = cur_frag[2]
                     coverage = cur_frag[3]
                     seg_index = map_fragment(start, end, segment_len)
+
+                    # if seq_name == 'chr_11_15708136-15719185-lLTR' and chr_name == 'Chr14' and start == 21886838 and end == 21890006:
+                    #     print('i')
 
                     prev_segment_frags = prev_chr_segment_list[seg_index]
                     # Check if there is an overlap of over 95% between the fragment in the segment and the test fragment.
@@ -4657,6 +4679,10 @@ def multiple_alignment_blast_v1(repeats_path, tools_dir, coverage_threshold, cat
             start = cur_frag[0]
             end = cur_frag[1]
             seq_name = cur_frag[2]
+
+            # if seq_name == 'chr_11_15708136-15719185-lLTR' and chr_name == 'Chr14' and start == 21886838 and end == 21890006:
+            #     print('h')
+
             coverage = cur_frag[3]
             seg_index = map_fragment(start, end, segment_len)
             segment_frags = cur_chr_segments[seg_index]
@@ -5714,6 +5740,110 @@ def filter_single_ltr(output_path, intact_output_path, leftLtr2Candidates, ltr_l
 
 def filter_single_copy_ltr(output_path, single_copy_internals_file, ltr_copies, internal_ltrs,
                            ltr_protein_db, other_protein_db, tmp_output_dir, threads,
+                           reference, leftLtr2Candidates, ltr_lines, log, debug):
+    # # 我们只保留具有 TSD + TG...CA 结构的单拷贝 或者 内部具有完整protein的。
+    # 我们只保留内部具有完整或 >=100 bp protein
+
+    # 判断单拷贝的内部序列是否有完整的蛋白质
+    single_copy_internals = {}
+    for name in ltr_copies.keys():
+        if len(ltr_copies[name]) <= 1:
+            single_copy_internals[name] = internal_ltrs[name]
+    store_fasta(single_copy_internals, single_copy_internals_file)
+
+    # temp_dir = tmp_output_dir + '/ltr_domain'
+    # query_protein_types = get_domain_info_v2(single_copy_internals_file, protein_db, threads, temp_dir, tool_dir)
+
+    temp_dir = tmp_output_dir + '/ltr_domain'
+    output_table = single_copy_internals_file + '.ltr_domain'
+    get_domain_info(single_copy_internals_file, ltr_protein_db, output_table, threads, temp_dir)
+    is_single_ltr_has_intact_protein = {}
+    protein_names, protein_contigs = read_fasta(ltr_protein_db)
+    with open(output_table, 'r') as f_r:
+        for i, line in enumerate(f_r):
+            if i < 2:
+                continue
+            parts = line.split('\t')
+            te_name = parts[0]
+            protein_name = parts[1]
+            protein_start = int(parts[4])
+            protein_end = int(parts[5])
+            intact_protein_len = len(protein_contigs[protein_name])
+            if float(abs(protein_end - protein_start)) / intact_protein_len >= 0.95:
+                is_single_ltr_has_intact_protein[te_name] = True
+
+    if not debug:
+        os.system('rm -rf ' + temp_dir)
+        os.system('rm -f ' + output_table)
+
+    temp_dir = tmp_output_dir + '/other_domain'
+    output_table = single_copy_internals_file + '.other_domain'
+    get_domain_info(single_copy_internals_file, other_protein_db, output_table, threads, temp_dir)
+    is_single_ltr_has_intact_other_protein = {}
+    protein_names, protein_contigs = read_fasta(other_protein_db)
+    with open(output_table, 'r') as f_r:
+        for i, line in enumerate(f_r):
+            if i < 2:
+                continue
+            parts = line.split('\t')
+            te_name = parts[0]
+            protein_name = parts[1]
+            protein_start = int(parts[4])
+            protein_end = int(parts[5])
+            intact_protein_len = len(protein_contigs[protein_name])
+            if float(abs(protein_end - protein_start)) / intact_protein_len >= 0.95:
+                is_single_ltr_has_intact_other_protein[te_name] = True
+
+    if not debug:
+        os.system('rm -rf ' + temp_dir)
+        os.system('rm -f ' + output_table)
+
+    # 判断单拷贝LTR是否有TSD结构
+    is_single_ltr_has_structure = {}
+    no_structure_single_count = 0
+    ref_names, ref_contigs = read_fasta(reference)
+    for ltr_name in single_copy_internals.keys():
+        candidate_index = leftLtr2Candidates[ltr_name]
+        line = ltr_lines[candidate_index]
+        parts = line.split(' ')
+        chr_name = parts[11]
+        ref_seq = ref_contigs[chr_name]
+        ltr_name, has_structure = is_ltr_has_structure(ltr_name, line, ref_seq)
+        is_single_ltr_has_structure[ltr_name] = has_structure
+        if not has_structure:
+            no_structure_single_count += 1
+    if log is not None:
+        log.logger.info('Filter the number of no structure single copy LTR: ' + str(no_structure_single_count) + ', remaining single copy LTR num: ' + str(len(single_copy_internals)-no_structure_single_count))
+
+
+    remain_intact_count = 0
+    filtered_intact_count = 0
+    with open(output_path, 'w') as f_save:
+        for name in ltr_copies.keys():
+            if len(ltr_copies[name]) >= 2:
+                cur_is_ltr = 1
+                remain_intact_count += 1
+            else:
+                if name in is_single_ltr_has_intact_other_protein and is_single_ltr_has_intact_other_protein[name]:
+                    cur_is_ltr = 0
+                    filtered_intact_count += 1
+                else:
+                    if (name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name]) \
+                            and (name in is_single_ltr_has_structure and is_single_ltr_has_structure[name]):
+                        cur_is_ltr = 1
+                        remain_intact_count += 1
+                    else:
+                        cur_is_ltr = 0
+                        filtered_intact_count += 1
+            f_save.write(name + '\t' + str(cur_is_ltr) + '\n')
+    if log is not None:
+        log.logger.info('Filter the number of non-intact LTR: ' + str(filtered_intact_count) + ', remaining LTR num: ' + str(remain_intact_count))
+
+    if not debug:
+        os.system('rm -f ' + single_copy_internals_file)
+
+def filter_single_copy_ltr_v1(output_path, single_copy_internals_file, ltr_copies, internal_ltrs,
+                           ltr_protein_db, other_protein_db, tmp_output_dir, threads,
                            reference, leftLtr2Candidates, ltr_lines, log):
     # # 我们只保留具有 TSD + TG...CA 结构的单拷贝 或者 内部具有完整protein的。
     # 我们只保留内部具有完整或 >=100 bp protein
@@ -5792,8 +5922,8 @@ def filter_single_copy_ltr(output_path, single_copy_internals_file, ltr_copies, 
                     cur_is_ltr = 0
                     filtered_intact_count += 1
                 else:
-                    if name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name] \
-                            and name in is_single_ltr_has_structure and is_single_ltr_has_structure[name]:
+                    if (name in is_single_ltr_has_intact_protein and is_single_ltr_has_intact_protein[name]) \
+                            and (name in is_single_ltr_has_structure and is_single_ltr_has_structure[name]):
                         cur_is_ltr = 1
                         remain_intact_count += 1
                     else:
@@ -5818,7 +5948,7 @@ def filter_single_copy_ltr(output_path, single_copy_internals_file, ltr_copies, 
     if log is not None:
         log.logger.info('Filter the number of non-intact LTR: ' + str(filtered_intact_count) + ', remaining LTR num: ' + str(remain_intact_count))
 
-def filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, full_length_threshold, log):
+def filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference, tmp_output_dir, split_ref_dir, threads, full_length_threshold, debug):
     true_ltrs = {}
     with open(output_path, 'r') as f_r:
         for line in f_r:
@@ -5837,11 +5967,6 @@ def filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference
             line = ltr_lines[candidate_index]
             confident_lines.append((name, line))
 
-    # # 获取每条序列的LTR终端是否在边界处具有 TSD + TG...CA motiff
-    # is_ltr_has_structure = {}
-    # left_size = 8
-    # internal_size = 3
-
     internal_ltrs = {}
     intact_ltrs = {}
     intact_ltr_path = tmp_output_dir + '/intact_ltr.fa'
@@ -5856,60 +5981,129 @@ def filter_ltr_by_copy_num(output_path, leftLtr2Candidates, ltr_lines, reference
 
         ref_seq = ref_contigs[chr_name]
 
-        # # 取左/右侧 8bp + 3bp
-        # # 计算左LTR的切片索引，并确保它们在范围内
-        # left_start = max(left_ltr_start - 1 - left_size, 0)
-        # left_end = min(left_ltr_start + internal_size - 1, len(ref_seq))
-        # left_seq = ref_seq[left_start: left_end]
-        #
-        # # 计算右LTR的切片索引，并确保它们在范围内
-        # right_start = max(right_ltr_end - internal_size, 0)
-        # right_end = min(right_ltr_end + left_size, len(ref_seq))
-        # right_seq = ref_seq[right_start: right_end]
-
-        # has_structure = False
-        # tsd_lens = [6, 5, 4]
-        # exist_tsd = set()
-        # tsd_motif_distance = 2
-        # for k_num in tsd_lens:
-        #     for i in range(len(left_seq) - k_num + 1):
-        #         left_kmer = left_seq[i: i + k_num]
-        #         tsd_right_seq = left_seq[i + k_num: i + k_num + tsd_motif_distance]
-        #         if 'N' not in left_kmer and 'TG' in tsd_right_seq:
-        #             exist_tsd.add(left_kmer)
-        # for k_num in tsd_lens:
-        #     if has_structure:
-        #         break
-        #     for i in range(len(right_seq) - k_num + 1):
-        #         right_kmer = right_seq[i: i + k_num]
-        #         start_pos = max(i - tsd_motif_distance, 0)
-        #         tsd_left_seq = right_seq[start_pos: i]
-        #         if 'N' not in right_kmer and right_kmer in exist_tsd and 'CA' in tsd_left_seq:
-        #             has_structure = True
-        #             break
-        # is_ltr_has_structure[name] = has_structure
-
         intact_ltr_seq = ref_seq[left_ltr_start-1: right_ltr_end]
         internal_ltr_seq = ref_seq[left_ltr_end: right_ltr_start - 1]
         internal_ltrs[name] = internal_ltr_seq
         if len(intact_ltr_seq) > 0:
-            # intactLTR_name = chr_name + '_' + str(left_ltr_start) + '-' + str(right_ltr_end) + '-intactLTR' + '#LTR'
             intact_ltrs[name] = intact_ltr_seq
     store_fasta(intact_ltrs, intact_ltr_path)
 
     temp_dir = tmp_output_dir + '/intact_ltr_filter'
-    ltr_copies = filter_ltr_by_copy_num_sub(intact_ltr_path, threads, temp_dir, split_ref_dir, full_length_threshold, internal_ltrs, log)
+    ltr_copies = filter_ltr_by_copy_num_sub(intact_ltr_path, threads, temp_dir, split_ref_dir, full_length_threshold, max_copy_num=10)
 
-    # 由于比对的问题，获取的拷贝并不总是带终端的，因此实际上不算全长拷贝。
-    # 因此我们获取拷贝之后再和原始结果计算overlap，如果overlap超过 95% 才算一个真的全长拷贝，否则不算。
+    if not debug:
+        os.system('rm -rf ' + temp_dir)
+        os.system('rm -f ' + intact_ltr_path)
+
+    # 我们获取拷贝之后再和原始结果计算overlap，如果overlap超过 95% 才算一个真的全长拷贝，否则不算。
     # 经常会出现获取了两个拷贝，但是实际上都是同一个拷贝(坐标overlap或者来自冗余contig)，因此我们要对拷贝去冗余
     intact_ltr_copies = get_intact_ltr_copies(ltr_copies, ltr_lines, full_length_threshold, reference)
 
-    # 过滤来自冗余contig的拷贝，即取拷贝的左侧100bp+右侧100bp组成的序列仍然能够很好比对
+    # 过滤来自冗余contig的拷贝，即取拷贝的左侧100bp+右侧100bp的序列，任意一侧能够很好比对就说明这两个全长拷贝是来自冗余contig造成的
     temp_dir = tmp_output_dir + '/intact_ltr_deredundant'
-    intact_ltr_copies = remove_copies_from_redundant_contig(intact_ltr_copies, reference, temp_dir, threads)
+    # intact_ltr_copies = remove_copies_from_redundant_contig(intact_ltr_copies, reference, temp_dir, threads)
+    intact_ltr_copies = remove_copies_from_redundant_contig_v1(intact_ltr_copies, reference, temp_dir, threads)
+
+    if not debug:
+        os.system('rm -rf ' + temp_dir)
 
     return intact_ltr_copies, internal_ltrs
+
+def remove_copies_from_redundant_contig_v1(intact_ltr_copies, reference, temp_dir, threads, flanking_len=100):
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+    ref_names, ref_contigs = read_fasta(reference)
+
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for ltr_name in intact_ltr_copies.keys():
+        cur_left_copy_path = temp_dir + '/' + ltr_name + '.left_copies'
+        cur_right_copy_path = temp_dir + '/' + ltr_name + '.right_copies'
+        copies = intact_ltr_copies[ltr_name]
+        cur_left_copy_contigs = {}
+        cur_right_copy_contigs = {}
+        copy_name_2_copy_dict = {}
+        for cur_copy in copies:
+            # 将所有拷贝都存成文件，然后
+            cur_copy_name = str(cur_copy[0]) + '-' + str(cur_copy[1]) + '-' + str(cur_copy[2])
+            ref_seq = ref_contigs[cur_copy[0]]
+            cur_copy_left_flank_seq = ref_seq[cur_copy[1] - flanking_len: cur_copy[1]]
+            cur_copy_right_flank_seq = ref_seq[cur_copy[2]: cur_copy[2] + flanking_len]
+            cur_left_copy_contigs[cur_copy_name] = cur_copy_left_flank_seq
+            cur_right_copy_contigs[cur_copy_name] = cur_copy_right_flank_seq
+            copy_name_2_copy_dict[cur_copy_name] = cur_copy
+        store_fasta(cur_left_copy_contigs, cur_left_copy_path)
+        store_fasta(cur_right_copy_contigs, cur_right_copy_path)
+
+        job = ex.submit(get_non_redundant_copies_v1, ltr_name, cur_left_copy_contigs, cur_left_copy_path, cur_right_copy_contigs, cur_right_copy_path, copy_name_2_copy_dict)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    intact_ltr_copies = {}
+    for job in as_completed(jobs):
+        ltr_name, cur_intact_ltr_copies = job.result()
+        intact_ltr_copies[ltr_name] = cur_intact_ltr_copies
+    return intact_ltr_copies
+
+def get_non_redundant_copies_v1(ltr_name, cur_left_copy_contigs, cur_left_copy_path, cur_right_copy_contigs, cur_right_copy_path, copy_name_2_copy_dict):
+    blastn_command = 'blastn -query ' + cur_left_copy_path + ' -subject ' + cur_left_copy_path + ' -num_threads ' + str(1) + ' -outfmt 6 '
+    result = subprocess.run(blastn_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            executable='/bin/bash')
+    redundant_copies = set()
+    if result.returncode == 0:
+        lines = result.stdout.split('\n')
+        for line in lines:
+            parts = line.split('\t')
+            if len(parts) != 12:
+                continue
+            query_name = parts[0]
+            subject_name = parts[1]
+            if query_name == subject_name:
+                continue
+            query_len = len(cur_left_copy_contigs[query_name])
+            subject_len = len(cur_left_copy_contigs[subject_name])
+
+            query_start = int(parts[6])
+            query_end = int(parts[7])
+            subject_start = int(parts[8])
+            subject_end = int(parts[9])
+            if abs(query_end - query_start) / query_len >= 0.95 and abs(
+                    subject_end - subject_start) / subject_len >= 0.95:
+                redundant_copies.add(query_name)
+                redundant_copies.add(subject_name)
+    blastn_command = 'blastn -query ' + cur_right_copy_path + ' -subject ' + cur_right_copy_path + ' -num_threads ' + str(1) + ' -outfmt 6 '
+    result = subprocess.run(blastn_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            executable='/bin/bash')
+    if result.returncode == 0:
+        lines = result.stdout.split('\n')
+        for line in lines:
+            parts = line.split('\t')
+            if len(parts) != 12:
+                continue
+            query_name = parts[0]
+            subject_name = parts[1]
+            if query_name == subject_name:
+                continue
+            query_len = len(cur_right_copy_contigs[query_name])
+            subject_len = len(cur_right_copy_contigs[subject_name])
+
+            query_start = int(parts[6])
+            query_end = int(parts[7])
+            subject_start = int(parts[8])
+            subject_end = int(parts[9])
+            if abs(query_end - query_start) / query_len >= 0.95 and abs(
+                    subject_end - subject_start) / subject_len >= 0.95:
+                redundant_copies.add(query_name)
+                redundant_copies.add(subject_name)
+
+    # 遍历 cur_copy_contigs，取所有非冗余的拷贝
+    intact_copies = []
+    for cur_copy_name in cur_left_copy_contigs.keys():
+        if cur_copy_name not in redundant_copies:
+            intact_copies.append(copy_name_2_copy_dict[cur_copy_name])
+    # 在冗余拷贝中任取一个加入到拷贝中
+    if len(redundant_copies) > 0:
+        intact_copies.append(copy_name_2_copy_dict[list(redundant_copies)[0]])
+    return ltr_name, intact_copies
 
 def remove_copies_from_redundant_contig(intact_ltr_copies, reference, temp_dir, threads, flanking_len=100):
     if not os.path.exists(temp_dir):
@@ -5977,7 +6171,7 @@ def get_non_redundant_copies(ltr_name, cur_copy_contigs, cur_copy_path, copy_nam
         intact_copies.append(copy_name_2_copy_dict[list(redundant_copies)[0]])
     return ltr_name, intact_copies
 
-def filter_ltr_by_copy_num_sub(candidate_sequence_path, threads, temp_dir, split_ref_dir, full_length_threshold, internal_ltrs, log):
+def filter_ltr_by_copy_num_sub(candidate_sequence_path, threads, temp_dir, split_ref_dir, full_length_threshold, max_copy_num=10):
     debug = 0
     # flanking_len = 100
     if os.path.exists(temp_dir):
@@ -5988,7 +6182,7 @@ def filter_ltr_by_copy_num_sub(candidate_sequence_path, threads, temp_dir, split
     # We are considering that the current running time is too long, maybe it is related to submitting one sequence for Blastn alignment at a time.
     # We will try to combine 10 sequences together and run Blastn once.
     # To increase CPU utilization, we will submit one thread to process 10 sequences.
-    batch_size = 10
+    batch_size = 1
     batch_id = 0
     names, contigs = read_fasta(candidate_sequence_path)
     split_files = []
@@ -6007,7 +6201,6 @@ def filter_ltr_by_copy_num_sub(candidate_sequence_path, threads, temp_dir, split
         split_files.append(cur_file)
         batch_id += 1
 
-    max_copy_num = 10
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for cur_split_files in split_files:
@@ -6029,7 +6222,7 @@ def get_domain_info(cons, lib, output_table, threads, temp_dir):
     # 1. blastx -num_threads 1 -evalue 1e-20
     partitions_num = int(threads)
     split_files = split_fasta(cons, temp_dir, partitions_num)
-    merge_distance = 100
+    merge_distance = 300
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for partition_index, cur_consensus_path in enumerate(split_files):
@@ -6445,8 +6638,10 @@ def get_recombination_ltr(ltr_candidates, ref_contigs, threads, log):
 def remove_dirty_LTR(confident_lines, log):
     new_confident_lines = []
     dirty_lines = []
+    dirty_dicts = {}
     for i, cur_line in enumerate(confident_lines):
         parts = cur_line.split(' ')
+        cur_chr_name = parts[11]
         cur_left_ltr_start = int(parts[3])
         cur_left_ltr_end = int(parts[4])
         cur_right_ltr_start = int(parts[6])
@@ -6455,10 +6650,15 @@ def remove_dirty_LTR(confident_lines, log):
         for j in range(i+1, len(confident_lines)):
             next_line = confident_lines[j]
             parts = next_line.split(' ')
+            next_chr_name = parts[11]
             next_left_ltr_start = int(parts[3])
             next_left_ltr_end = int(parts[4])
             next_right_ltr_start = int(parts[6])
             next_right_ltr_end = int(parts[7])
+
+            if cur_chr_name != next_chr_name:
+                break
+
             # 如果 next_left_ltr_start 和 next_right_ltr_end 在 当前LTR序列的内部，则认为当前LTR不干净
             if cur_left_ltr_end < next_left_ltr_start < cur_right_ltr_start and cur_left_ltr_end < next_right_ltr_end < cur_right_ltr_start:
                 is_dirty = True
@@ -6470,11 +6670,14 @@ def remove_dirty_LTR(confident_lines, log):
             new_confident_lines.append(cur_line)
         else:
             dirty_lines.append(cur_line)
-    log.logger.debug('Remove dirty LTR: ' + str(len(dirty_lines)) + ', remaining LTR num: ' + str(len(new_confident_lines)))
+            cur_name = cur_chr_name + '-' + str(cur_left_ltr_start) + '-' + str(cur_left_ltr_end)
+            dirty_dicts[cur_name] = 1
+    # log.logger.debug('Remove dirty LTR: ' + str(len(dirty_lines)) + ', remaining LTR num: ' + str(len(new_confident_lines)))
     # print(dirty_lines)
-    return new_confident_lines
+    return dirty_dicts
 
 def deredundant_for_LTR(redundant_ltr, work_dir, threads, type, coverage_threshold):
+    starttime = time.time()
     # We found that performing a direct mafft alignment on the redundant LTR library was too slow.
     # Therefore, we first need to use Blastn for alignment clustering, and then proceed with mafft processing.
     tmp_blast_dir = work_dir + '/LTR_blastn_' + str(type)
@@ -6486,6 +6689,7 @@ def deredundant_for_LTR(redundant_ltr, work_dir, threads, type, coverage_thresho
     # 2. Next, using the FMEA algorithm, bridge across the gaps and link together sequences that can be connected.
     full_length_threshold = 0.8
     longest_repeats = FMEA_new(redundant_ltr, blastnResults_path, full_length_threshold)
+
     # 3. If the combined sequence length constitutes 95% or more of the original individual sequence lengths, we place these two sequences into a cluster.
     contigNames, contigs = read_fasta(redundant_ltr)
     keep_clusters = []
@@ -6519,20 +6723,28 @@ def deredundant_for_LTR(redundant_ltr, work_dir, threads, type, coverage_thresho
                     new_cluster.add(subject_name)
                     keep_clusters.append(new_cluster)
                     # print(keep_clusters)
-    # Iterate through each cluster, if any element in the cluster overlaps with elements in other clusters, merge the clusters.
-    merged_clusters = []
-    while keep_clusters:
-        current_cluster = keep_clusters.pop(0)
-        for other_cluster in keep_clusters[:]:
-            if current_cluster.intersection(other_cluster):
-                current_cluster.update(other_cluster)
-                keep_clusters.remove(other_cluster)
-        merged_clusters.append(current_cluster)
-    keep_clusters = merged_clusters
+
+    # # Iterate through each cluster, if any element in the cluster overlaps with elements in other clusters, merge the clusters.
+    # merged_clusters = []
+    # while keep_clusters:
+    #     current_cluster = keep_clusters.pop(0)
+    #     for other_cluster in keep_clusters[:]:
+    #         if current_cluster.intersection(other_cluster):
+    #             current_cluster.update(other_cluster)
+    #             keep_clusters.remove(other_cluster)
+    #     merged_clusters.append(current_cluster)
+    # keep_clusters = merged_clusters
+
+    endtime = time.time()
+    dtime = endtime - starttime
+    print("Running time of FMEA clustering: %.8s s" % (dtime))
+
+    starttime = time.time()
     # store cluster
     all_unique_name = set()
     raw_cluster_files = []
     cluster_dir = work_dir + '/raw_ltr_cluster_' + str(type)
+    os.system('rm -rf ' + cluster_dir)
     if not os.path.exists(cluster_dir):
         os.makedirs(cluster_dir)
     for cluster_id, cur_cluster in enumerate(keep_clusters):
@@ -6543,6 +6755,197 @@ def deredundant_for_LTR(redundant_ltr, work_dir, threads, type, coverage_thresho
             all_unique_name.add(ltr_name)
         store_fasta(cur_cluster_contigs, cur_cluster_path)
         raw_cluster_files.append((cluster_id, cur_cluster_path))
+    # We save the sequences that did not appear in any clusters separately. These sequences do not require clustering.
+    uncluster_path = work_dir + '/uncluster_ltr_' + str(type) + '.fa'
+    uncluster_contigs = {}
+    for name in contigNames:
+        if name not in all_unique_name:
+            uncluster_contigs[name] = contigs[name]
+    store_fasta(uncluster_contigs, uncluster_path)
+
+
+    # 4. The final cluster should encompass all instances from the same family.
+    # We use Ninja to cluster families precisely, and
+    # We then use the mafft+majority principle to generate a consensus sequence for each cluster.
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for cluster_id, cur_cluster_path in raw_cluster_files:
+        job = ex.submit(generate_cons, cluster_id, cur_cluster_path, cluster_dir, 1)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    all_cons = {}
+    for job in as_completed(jobs):
+        cur_cons_contigs = job.result()
+        all_cons.update(cur_cons_contigs)
+
+    all_cons.update(uncluster_contigs)
+
+    ltr_cons_path = redundant_ltr + '.tmp.cons'
+    store_fasta(all_cons, ltr_cons_path)
+
+    endtime = time.time()
+    dtime = endtime - starttime
+    print("Running time of MSA cons: %.8s s" % (dtime))
+
+    ltr_cons_cons = redundant_ltr + '.cons'
+    # 调用 cd-hit-est 合并碎片化序列
+    cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+                     + ' -G 0 -g 1 -A 80 -i ' + ltr_cons_path + ' -o ' + ltr_cons_cons + ' -T 0 -M 0'
+    os.system(cd_hit_command + ' > /dev/null 2>&1')
+
+    #rename_fasta(ltr_cons_path, ltr_cons_path, 'LTR')
+    return ltr_cons_path
+
+def deredundant_for_LTR_v5(redundant_ltr, work_dir, threads, type, coverage_threshold, debug):
+    starttime = time.time()
+    # We found that performing a direct mafft alignment on the redundant LTR library was too slow.
+    # Therefore, we first need to use Blastn for alignment clustering, and then proceed with mafft processing.
+    tmp_blast_dir = work_dir + '/LTR_blastn_' + str(type)
+    blastnResults_path = work_dir + '/LTR_blastn_' + str(type) + '.out'
+    # 1. Start by performing an all-vs-all comparison using blastn.
+    multi_process_align(redundant_ltr, redundant_ltr, blastnResults_path, tmp_blast_dir, threads, is_removed_dir=True)
+    if not os.path.exists(blastnResults_path):
+        return redundant_ltr
+    # 2. Next, using the FMEA algorithm, bridge across the gaps and link together sequences that can be connected.
+    longest_repeats = FMEA_new(redundant_ltr, blastnResults_path, coverage_threshold)
+
+    # 3. If the combined sequence length constitutes 95% or more of the original individual sequence lengths, we place these two sequences into a cluster.
+    contigNames, contigs = read_fasta(redundant_ltr)
+    keep_clusters = []
+    redundant_ltr_names = set()
+    for query_name in longest_repeats.keys():
+        if query_name in redundant_ltr_names:
+            continue
+        longest_repeats_list = longest_repeats[query_name]
+        cur_cluster = set()
+        cur_cluster.add(query_name)
+        for cur_longest_repeat in longest_repeats_list:
+            query_name = cur_longest_repeat[0]
+            query_len = len(contigs[query_name])
+            q_len = abs(cur_longest_repeat[2] - cur_longest_repeat[1])
+            subject_name = cur_longest_repeat[3]
+            subject_len = len(contigs[subject_name])
+            s_len = abs(cur_longest_repeat[4] - cur_longest_repeat[5])
+            # 我们这里先将跨过 gap 之后的全长拷贝先聚类在一起，后续再使用 cd-hit 将碎片化合并到全长拷贝中
+            if float(q_len) / query_len >= coverage_threshold or float(s_len) / subject_len >= coverage_threshold:
+                # we consider the query and subject to be from the same family.
+                cur_cluster.add(subject_name)
+                redundant_ltr_names.add(subject_name)
+        keep_clusters.append(cur_cluster)
+
+    endtime = time.time()
+    dtime = endtime - starttime
+    # print("Running time of FMEA clustering: %.8s s" % (dtime))
+    if not debug:
+        os.system('rm -f ' + blastnResults_path)
+        os.system('rm -rf ' + tmp_blast_dir)
+
+
+    starttime = time.time()
+    # store cluster
+    all_unique_name = set()
+    raw_cluster_files = []
+    cluster_dir = work_dir + '/raw_ltr_cluster_' + str(type)
+    os.system('rm -rf ' + cluster_dir)
+    if not os.path.exists(cluster_dir):
+        os.makedirs(cluster_dir)
+    for cluster_id, cur_cluster in enumerate(keep_clusters):
+        cur_cluster_path = cluster_dir + '/' + str(cluster_id) + '.fa'
+        cur_cluster_contigs = {}
+        for ltr_name in cur_cluster:
+            cur_cluster_contigs[ltr_name] = contigs[ltr_name]
+            all_unique_name.add(ltr_name)
+        store_fasta(cur_cluster_contigs, cur_cluster_path)
+        raw_cluster_files.append((cluster_id, cur_cluster_path))
+    # We save the sequences that did not appear in any clusters separately. These sequences do not require clustering.
+    uncluster_path = work_dir + '/uncluster_ltr_' + str(type) + '.fa'
+    uncluster_contigs = {}
+    for name in contigNames:
+        if name not in all_unique_name:
+            uncluster_contigs[name] = contigs[name]
+    store_fasta(uncluster_contigs, uncluster_path)
+
+
+    # 4. The final cluster should encompass all instances from the same family.
+    # We use Ninja to cluster families precisely, and
+    # We then use the mafft+majority principle to generate a consensus sequence for each cluster.
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for cluster_id, cur_cluster_path in raw_cluster_files:
+        job = ex.submit(generate_cons, cluster_id, cur_cluster_path, cluster_dir, 1)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    all_cons = {}
+    for job in as_completed(jobs):
+        cur_cons_contigs = job.result()
+        all_cons.update(cur_cons_contigs)
+
+    all_cons.update(uncluster_contigs)
+
+    ltr_cons_path = redundant_ltr + '.tmp.cons'
+    store_fasta(all_cons, ltr_cons_path)
+
+    endtime = time.time()
+    dtime = endtime - starttime
+    # print("Running time of MSA cons: %.8s s" % (dtime))
+    if not debug:
+        os.system('rm -f ' + uncluster_path)
+        os.system('rm -rf ' + cluster_dir)
+
+    ltr_cons_cons = redundant_ltr + '.cons'
+    # 调用 cd-hit-est 合并碎片化序列
+    cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(coverage_threshold) \
+                     + ' -G 0 -g 1 -A 80 -i ' + ltr_cons_path + ' -o ' + ltr_cons_cons + ' -T 0 -M 0'
+    os.system(cd_hit_command + ' > /dev/null 2>&1')
+
+    #rename_fasta(ltr_cons_path, ltr_cons_path, 'LTR')
+    return ltr_cons_path
+
+def deredundant_for_LTR_v2(redundant_ltr, work_dir, threads, type, coverage_threshold):
+    # We found that performing a direct mafft alignment on the redundant LTR library was too slow.
+    # Therefore, we first need to use Blastn for alignment clustering, and then proceed with mafft processing.
+    tmp_blast_dir = work_dir + '/LTR_blastn_' + str(type)
+    blastnResults_path = work_dir + '/LTR_blastn_' + str(type) + '.out'
+    # 1. Start by performing an all-vs-all comparison using blastn.
+    multi_process_align(redundant_ltr, redundant_ltr, blastnResults_path, tmp_blast_dir, threads, is_removed_dir=True)
+    if not os.path.exists(blastnResults_path):
+        return redundant_ltr
+    # 2. Next, using the FMEA algorithm, bridge across the gaps and link together sequences that can be connected.
+    longest_repeats = FMEA_new(redundant_ltr, blastnResults_path, coverage_threshold)
+    # 3. If the combined sequence length constitutes 95% or more of the original individual sequence lengths, we place these two sequences into a cluster.
+    contigNames, contigs = read_fasta(redundant_ltr)
+    keep_clusters = []
+    for query_name in longest_repeats.keys():
+        longest_repeats_list = longest_repeats[query_name]
+        cur_cluster = set()
+        for cur_longest_repeat in longest_repeats_list:
+            query_name = cur_longest_repeat[0]
+            query_len = len(contigs[query_name])
+            q_len = abs(cur_longest_repeat[2] - cur_longest_repeat[1])
+            subject_name = cur_longest_repeat[3]
+            subject_len = len(contigs[subject_name])
+            s_len = abs(cur_longest_repeat[4] - cur_longest_repeat[5])
+            # 我们这里先将跨过 gap 之后的全长拷贝先聚类在一起，后续再使用 cd-hit 将碎片化合并到全长拷贝中
+            if float(q_len) / query_len >= coverage_threshold or float(s_len) / subject_len >= coverage_threshold:
+                # we consider the query and subject to be from the same family.
+                cur_cluster.add(query_name)
+                cur_cluster.add(subject_name)
+        keep_clusters.append(cur_cluster)
+    # store cluster
+    all_unique_name = set()
+    raw_cluster_files = []
+    cluster_dir = work_dir + '/raw_ltr_cluster_' + str(type)
+    if not os.path.exists(cluster_dir):
+        os.makedirs(cluster_dir)
+    for cluster_id, cur_cluster in enumerate(keep_clusters):
+        if len(cur_cluster) > 1:
+            cur_cluster_path = cluster_dir + '/' + str(cluster_id) + '.fa'
+            cur_cluster_contigs = {}
+            for ltr_name in cur_cluster:
+                cur_cluster_contigs[ltr_name] = contigs[ltr_name]
+                all_unique_name.add(ltr_name)
+            store_fasta(cur_cluster_contigs, cur_cluster_path)
+            raw_cluster_files.append((cluster_id, cur_cluster_path))
     # We save the sequences that did not appear in any clusters separately. These sequences do not require clustering.
     uncluster_path = work_dir + '/uncluster_ltr_' + str(type) + '.fa'
     uncluster_contigs = {}
@@ -6575,6 +6978,215 @@ def deredundant_for_LTR(redundant_ltr, work_dir, threads, type, coverage_thresho
     os.system(cd_hit_command + ' > /dev/null 2>&1')
 
     #rename_fasta(ltr_cons_path, ltr_cons_path, 'LTR')
+    return ltr_cons_path
+
+def deredundant_for_LTR_v3(redundant_ltr, work_dir, threads, type, coverage_threshold, split_ref_dir, reference):
+    # We found that performing a direct mafft alignment on the redundant LTR library was too slow.
+    # Therefore, we first need to use Blastn for alignment clustering, and then proceed with mafft processing.
+    tmp_blast_dir = work_dir + '/LTR_blastn_' + str(type)
+    blastnResults_path = work_dir + '/LTR_blastn_' + str(type) + '.out'
+    # 1. Start by performing an all-vs-all comparison using blastn.
+    multi_process_align(redundant_ltr, redundant_ltr, blastnResults_path, tmp_blast_dir, threads, is_removed_dir=True)
+    if not os.path.exists(blastnResults_path):
+        return redundant_ltr
+    # 2. Next, using the FMEA algorithm, bridge across the gaps and link together sequences that can be connected.
+    longest_repeats = FMEA_new(redundant_ltr, blastnResults_path, coverage_threshold)
+    # 3. If the combined sequence length constitutes 95% or more of the original individual sequence lengths, we place these two sequences into a cluster.
+    contigNames, contigs = read_fasta(redundant_ltr)
+    represent_ltr_names = set()
+    redundant_ltr_names = set()
+    for query_name in longest_repeats.keys():
+        longest_repeats_list = longest_repeats[query_name]
+        for cur_longest_repeat in longest_repeats_list:
+            query_name = cur_longest_repeat[0]
+            query_len = len(contigs[query_name])
+            q_len = abs(cur_longest_repeat[2] - cur_longest_repeat[1])
+            subject_name = cur_longest_repeat[3]
+            subject_len = len(contigs[subject_name])
+            s_len = abs(cur_longest_repeat[4] - cur_longest_repeat[5])
+            # 我们这里先将跨过 gap 之后的全长拷贝先聚类在一起，后续再使用 cd-hit 将碎片化合并到全长拷贝中
+            if float(q_len) / query_len >= coverage_threshold and float(s_len) / subject_len >= coverage_threshold:
+                # we consider the query and subject to be from the same family.
+                if query_name not in redundant_ltr_names:
+                    represent_ltr_names.add(query_name)
+                redundant_ltr_names.add(subject_name)
+
+    # 将在 represent_ltr_names 和 (不在 represent_ltr_names 和 redundant_ltr_names)的ltr存储成文件，然后获取它们的拷贝，进行MSA
+    represent_ltr1 = redundant_ltr + '.rep1'
+    represent_ltr_contigs = {}
+    for ltr_name in contigNames:
+        if ltr_name in represent_ltr_names:
+            represent_ltr_contigs[ltr_name] = contigs[ltr_name]
+        elif ltr_name not in redundant_ltr_names:
+            represent_ltr_contigs[ltr_name] = contigs[ltr_name]
+    store_fasta(represent_ltr_contigs, represent_ltr1)
+    # 调用cd-hit-est 再次压缩，获取非冗余
+    represent_ltr2 = represent_ltr1 + '.rep2'
+    cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+                     + ' -G 0 -g 1 -A 80 -i ' + represent_ltr1 + ' -o ' + represent_ltr2 + ' -T 0 -M 0'
+    os.system(cd_hit_command + ' > /dev/null 2>&1')
+    represent_ltr_names, represent_ltr_contigs = read_fasta(represent_ltr2)
+
+    temp_dir = work_dir + '/ltr_copies_' + str(type)
+    max_copy_num = 10
+    all_copies = get_full_length_copies_batch_v1(represent_ltr2, split_ref_dir, threads, temp_dir, max_copy_num, coverage_threshold)
+
+    raw_copy_cluster_files = []
+    ref_names, ref_contigs = read_fasta(reference)
+    # 获取每个序列对应的全长拷贝，放在一个文件中
+    copy_cluster_dir = work_dir + '/raw_ltr_copies_cluster_' + str(type)
+    no_copy_path = work_dir + '/no_copy_ltr_' + str(type) + '.fa'
+    no_copy_contigs = {}
+    if not os.path.exists(copy_cluster_dir):
+        os.makedirs(copy_cluster_dir)
+    for ltr_name in represent_ltr_names:
+        cur_copy_cluster_path = copy_cluster_dir + '/' + str(ltr_name) + '.fa'
+        cur_copy_cluster_contigs = {}
+        if ltr_name in all_copies:
+            for copy in all_copies[ltr_name]:
+                chr_name = copy[0]
+                chr_start = int(copy[1])
+                chr_end = int(copy[2])
+                copy_name = chr_name + '-' + str(chr_start) + '-' + str(chr_end)
+                te_seq = ref_contigs[chr_name][chr_start: chr_end]
+                cur_copy_cluster_contigs[copy_name] = te_seq
+        else:
+            no_copy_contigs[ltr_name] = represent_ltr_contigs[ltr_name]
+        store_fasta(cur_copy_cluster_contigs, cur_copy_cluster_path)
+        raw_copy_cluster_files.append(cur_copy_cluster_path)
+    store_fasta(no_copy_contigs, no_copy_path)
+
+    # 4. The final cluster should encompass all instances from the same family.
+    # We use Ninja to cluster families precisely, and
+    # We then use the mafft+majority principle to generate a consensus sequence for each cluster.
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for cluster_id, cur_copy_cluster_path in enumerate(raw_copy_cluster_files):
+        job = ex.submit(generate_cons, cluster_id, cur_copy_cluster_path, copy_cluster_dir)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    all_cons = {}
+    for job in as_completed(jobs):
+        cur_cons_contigs = job.result()
+        all_cons.update(cur_cons_contigs)
+    all_cons.update(no_copy_contigs)
+    ltr_cons_path = redundant_ltr + '.tmp.cons'
+    store_fasta(all_cons, ltr_cons_path)
+
+    ltr_cons_cons = redundant_ltr + '.cons'
+    # 调用 cd-hit-est 合并碎片化序列
+    cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+                     + ' -G 0 -g 1 -A 80 -i ' + ltr_cons_path + ' -o ' + ltr_cons_cons + ' -T 0 -M 0'
+    os.system(cd_hit_command + ' > /dev/null 2>&1')
+    return ltr_cons_path
+
+def deredundant_for_LTR_v4(redundant_ltr, work_dir, threads, type, coverage_threshold, split_ref_dir, reference):
+    # We found that performing a direct mafft alignment on the redundant LTR library was too slow.
+    # Therefore, we first need to use Blastn for alignment clustering, and then proceed with mafft processing.
+    tmp_blast_dir = work_dir + '/LTR_blastn_' + str(type)
+    blastnResults_path = work_dir + '/LTR_blastn_' + str(type) + '.out'
+    # 1. Start by performing an all-vs-all comparison using blastn.
+    multi_process_align(redundant_ltr, redundant_ltr, blastnResults_path, tmp_blast_dir, threads, is_removed_dir=True)
+    if not os.path.exists(blastnResults_path):
+        return redundant_ltr
+    # 2. Next, using the FMEA algorithm, bridge across the gaps and link together sequences that can be connected.
+    longest_repeats = FMEA_new(redundant_ltr, blastnResults_path, coverage_threshold)
+    # 3. If the combined sequence length constitutes 95% or more of the original individual sequence lengths, we place these two sequences into a cluster.
+    contigNames, contigs = read_fasta(redundant_ltr)
+    represent_ltr_names = {}
+    redundant_ltr_names = set()
+    for query_name in longest_repeats.keys():
+        longest_repeats_list = longest_repeats[query_name]
+        for cur_longest_repeat in longest_repeats_list:
+            query_name = cur_longest_repeat[0]
+            query_len = len(contigs[query_name])
+            q_len = abs(cur_longest_repeat[2] - cur_longest_repeat[1])
+            subject_name = cur_longest_repeat[3]
+            subject_len = len(contigs[subject_name])
+            s_len = abs(cur_longest_repeat[4] - cur_longest_repeat[5])
+            # 我们这里先将跨过 gap 之后的全长拷贝先聚类在一起，后续再使用 cd-hit 将碎片化合并到全长拷贝中
+            if float(q_len) / query_len >= coverage_threshold or float(s_len) / subject_len >= coverage_threshold:
+                # 只保留长的那一条当作代表
+                if q_len > s_len:
+                    represent_ltr_name = query_name
+                    redundant_ltr_name = subject_name
+                else:
+                    represent_ltr_name = subject_name
+                    redundant_ltr_name = query_name
+
+                redundant_ltr_names.add(redundant_ltr_name)
+                if redundant_ltr_name in represent_ltr_names:
+                    del represent_ltr_names[redundant_ltr_name]
+                if represent_ltr_name not in redundant_ltr_names:
+                    represent_ltr_names[represent_ltr_name] = 1
+
+    # 将在 represent_ltr_names 和 (不在 represent_ltr_names 和 redundant_ltr_names)的ltr存储成文件，然后获取它们的拷贝，进行MSA
+    represent_ltr1 = redundant_ltr + '.rep1'
+    represent_ltr_contigs = {}
+    for ltr_name in contigNames:
+        if ltr_name in represent_ltr_names:
+            represent_ltr_contigs[ltr_name] = contigs[ltr_name]
+        elif ltr_name not in redundant_ltr_names:
+            represent_ltr_contigs[ltr_name] = contigs[ltr_name]
+    store_fasta(represent_ltr_contigs, represent_ltr1)
+    # 调用cd-hit-est 再次压缩，获取非冗余
+    represent_ltr2 = represent_ltr1 + '.rep2'
+    cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+                     + ' -G 0 -g 1 -A 80 -i ' + represent_ltr1 + ' -o ' + represent_ltr2 + ' -T 0 -M 0'
+    os.system(cd_hit_command + ' > /dev/null 2>&1')
+    represent_ltr_names, represent_ltr_contigs = read_fasta(represent_ltr2)
+
+    temp_dir = work_dir + '/ltr_copies_' + str(type)
+    max_copy_num = 10
+    all_copies = get_full_length_copies_batch_v1(represent_ltr2, split_ref_dir, threads, temp_dir, max_copy_num, coverage_threshold)
+
+    raw_copy_cluster_files = []
+    ref_names, ref_contigs = read_fasta(reference)
+    # 获取每个序列对应的全长拷贝，放在一个文件中
+    copy_cluster_dir = work_dir + '/raw_ltr_copies_cluster_' + str(type)
+    no_copy_path = work_dir + '/no_copy_ltr_' + str(type) + '.fa'
+    no_copy_contigs = {}
+    if not os.path.exists(copy_cluster_dir):
+        os.makedirs(copy_cluster_dir)
+    for ltr_name in represent_ltr_names:
+        cur_copy_cluster_path = copy_cluster_dir + '/' + str(ltr_name) + '.fa'
+        cur_copy_cluster_contigs = {}
+        if ltr_name in all_copies:
+            for copy in all_copies[ltr_name]:
+                chr_name = copy[0]
+                chr_start = int(copy[1])
+                chr_end = int(copy[2])
+                copy_name = chr_name + '-' + str(chr_start) + '-' + str(chr_end)
+                te_seq = ref_contigs[chr_name][chr_start: chr_end]
+                cur_copy_cluster_contigs[copy_name] = te_seq
+        else:
+            no_copy_contigs[ltr_name] = represent_ltr_contigs[ltr_name]
+        store_fasta(cur_copy_cluster_contigs, cur_copy_cluster_path)
+        raw_copy_cluster_files.append(cur_copy_cluster_path)
+    store_fasta(no_copy_contigs, no_copy_path)
+
+    # 4. The final cluster should encompass all instances from the same family.
+    # We use Ninja to cluster families precisely, and
+    # We then use the mafft+majority principle to generate a consensus sequence for each cluster.
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for cluster_id, cur_copy_cluster_path in enumerate(raw_copy_cluster_files):
+        job = ex.submit(generate_cons, cluster_id, cur_copy_cluster_path, copy_cluster_dir)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    all_cons = {}
+    for job in as_completed(jobs):
+        cur_cons_contigs = job.result()
+        all_cons.update(cur_cons_contigs)
+    all_cons.update(no_copy_contigs)
+    ltr_cons_path = redundant_ltr + '.tmp.cons'
+    store_fasta(all_cons, ltr_cons_path)
+
+    ltr_cons_cons = redundant_ltr + '.cons'
+    # 调用 cd-hit-est 合并碎片化序列
+    cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+                     + ' -G 0 -g 1 -A 80 -i ' + ltr_cons_path + ' -o ' + ltr_cons_cons + ' -T 0 -M 0'
+    os.system(cd_hit_command + ' > /dev/null 2>&1')
     return ltr_cons_path
 
 def deredundant_for_LTR_v1(redundant_ltr, work_dir, reference, split_ref_dir, threads, coverage_threshold, type):
@@ -6857,18 +7469,19 @@ def cons_from_mafft(align_file):
         #     model_seq += max_base
     return model_seq
 
-def generate_cons(cluster_id, cur_cluster_path, cluster_dir):
+def generate_cons(cluster_id, cur_cluster_path, cluster_dir, threads):
     ltr_terminal_names, ltr_terminal_contigs = read_fasta(cur_cluster_path)
     temp_cluster_dir = cluster_dir
     cons_contigs = {}
     if len(ltr_terminal_contigs) >= 1:
         align_file = cur_cluster_path + '.maf.fa'
-        align_command = 'cd ' + cluster_dir + ' && mafft --preservecase --quiet --thread -1 ' + cur_cluster_path + ' > ' + align_file
+        align_command = 'cd ' + cluster_dir + ' && mafft --preservecase --quiet --thread ' + str(threads) + ' ' + cur_cluster_path + ' > ' + align_file
+        # align_command = 'cd ' + cluster_dir + ' && famsa -t ' + str(threads) + ' -medoidtree ' + cur_cluster_path + ' ' + align_file + ' > /dev/null 2>&1'
         os.system(align_command)
 
         # 调用 Ninja 对多序列比对再次聚类
         cluster_file = align_file + '.dat'
-        Ninja_command = 'Ninja --in ' + align_file + ' --out ' + cluster_file + ' --out_type c --corr_type m --cluster_cutoff 0.2 --threads 1'
+        Ninja_command = 'Ninja --in ' + align_file + ' --out ' + cluster_file + ' --out_type c --corr_type m --cluster_cutoff 0.2 --threads ' + str(threads)
         os.system(Ninja_command + ' > /dev/null 2>&1')
 
         # 解析聚类文件，生成不同簇
@@ -6888,7 +7501,50 @@ def generate_cons(cluster_id, cur_cluster_path, cluster_dir):
 
             cur_align_file = cur_cluster_file + '.maf.fa'
             if len(cur_cluster_contigs) >= 1:
-                align_command = 'cd ' + Ninja_cluster_dir + ' && mafft --preservecase --quiet --thread -1 ' + cur_cluster_file + ' > ' + cur_align_file
+                align_command = 'cd ' + Ninja_cluster_dir + ' && mafft --preservecase --quiet --thread ' + str(threads) + ' ' + cur_cluster_file + ' > ' + cur_align_file
+                # align_command = 'cd ' + Ninja_cluster_dir + ' && famsa -t ' + str(threads) + ' -medoidtree ' + cur_cluster_file + ' ' + cur_align_file + ' > /dev/null 2>&1'
+                os.system(align_command)
+                cons_seq = cons_from_mafft(cur_align_file)
+                cons_contigs[cur_ltr_name] = cons_seq
+    # 如果未能识别到可靠的一致性序列，则使用原始序列代替
+    if len(cons_contigs) > 0:
+        return cons_contigs
+    else:
+        return ltr_terminal_contigs
+
+def generate_cons_v1(cluster_id, cur_cluster_path, cluster_dir, threads):
+    ltr_terminal_names, ltr_terminal_contigs = read_fasta(cur_cluster_path)
+    temp_cluster_dir = cluster_dir
+    cons_contigs = {}
+    if len(ltr_terminal_contigs) >= 1:
+        align_file = cur_cluster_path + '.maf.fa'
+        align_command = 'cd ' + cluster_dir + ' && famsa -t ' + str(threads) + ' ' + cur_cluster_path + ' ' + align_file + ' > /dev/null 2>&1'
+        os.system(align_command)
+
+        # 调用 Ninja 对多序列比对再次聚类
+        cluster_file = align_file + '.dat'
+        Ninja_command = 'Ninja --in ' + align_file + ' --out ' + cluster_file + ' --out_type c --corr_type m --cluster_cutoff 0.2 --threads ' + str(threads)
+        os.system(Ninja_command + ' > /dev/null 2>&1')
+
+        # 解析聚类文件，生成不同簇
+        Ninja_cluster_dir = temp_cluster_dir + '/Ninja_' + str(cluster_id)
+        if not os.path.exists(Ninja_cluster_dir):
+            os.makedirs(Ninja_cluster_dir)
+        clusters = read_Ninja_clusters(cluster_file)
+        for cur_cluster_id in clusters.keys():
+            cur_cluster_file = Ninja_cluster_dir + '/' + str(cur_cluster_id) + '.fa'
+            cur_cluster_contigs = {}
+            cur_ltr_name = ''
+            for name in clusters[cur_cluster_id]:
+                seq = ltr_terminal_contigs[name]
+                cur_cluster_contigs[name] = seq
+                cur_ltr_name = name
+            store_fasta(cur_cluster_contigs, cur_cluster_file)
+
+            cur_align_file = cur_cluster_file + '.maf.fa'
+            if len(cur_cluster_contigs) >= 1:
+                align_command = 'cd ' + Ninja_cluster_dir + ' && mafft --preservecase --quiet --thread ' + str(threads) + ' ' + cur_cluster_file + ' > ' + cur_align_file
+                # align_command = 'cd ' + Ninja_cluster_dir + ' && famsa -t ' + str(threads) + ' -medoidtree ' + cur_cluster_file + ' ' + cur_align_file + ' > /dev/null 2>&1'
                 os.system(align_command)
                 cons_seq = cons_from_mafft(cur_align_file)
                 cons_contigs[cur_ltr_name] = cons_seq
@@ -7187,6 +7843,7 @@ def FMEA_new(query_path, blastn2Results_path, full_length_threshold):
             reverse_pos.sort(key=lambda x: (-x[2], -x[3]))
 
             forward_long_frags = {}
+            frag_index_array = []
             frag_index = 0
             for k, frag in enumerate(forward_pos):
                 is_update = False
@@ -7194,12 +7851,15 @@ def FMEA_new(query_path, blastn2Results_path, full_length_threshold):
                 cur_subject_end = frag[3]
                 cur_query_start = frag[0]
                 cur_query_end = frag[1]
-                for cur_frag_index in forward_long_frags.keys():
+                for cur_frag_index in reversed(frag_index_array):
                     cur_frag = forward_long_frags[cur_frag_index]
                     prev_subject_start = cur_frag[2]
                     prev_subject_end = cur_frag[3]
                     prev_query_start = cur_frag[0]
                     prev_query_end = cur_frag[1]
+
+                    if cur_subject_start - prev_subject_end >= skip_gap:
+                        break
 
                     if cur_subject_end > prev_subject_end:
                         # forward extend
@@ -7214,11 +7874,13 @@ def FMEA_new(query_path, blastn2Results_path, full_length_threshold):
                             forward_long_frags[cur_frag_index] = extend_frag
                             is_update = True
                 if not is_update:
+                    frag_index_array.append(frag_index)
                     forward_long_frags[frag_index] = (cur_query_start, cur_query_end, cur_subject_start, cur_subject_end, subject_name)
                     frag_index += 1
             longest_queries += list(forward_long_frags.values())
 
             reverse_long_frags = {}
+            frag_index_array = []
             frag_index = 0
             for k, frag in enumerate(reverse_pos):
                 is_update = False
@@ -7226,12 +7888,15 @@ def FMEA_new(query_path, blastn2Results_path, full_length_threshold):
                 cur_subject_end = frag[3]
                 cur_query_start = frag[0]
                 cur_query_end = frag[1]
-                for cur_frag_index in reverse_long_frags.keys():
+                for cur_frag_index in reversed(frag_index_array):
                     cur_frag = reverse_long_frags[cur_frag_index]
                     prev_subject_start = cur_frag[2]
                     prev_subject_end = cur_frag[3]
                     prev_query_start = cur_frag[0]
                     prev_query_end = cur_frag[1]
+
+                    if prev_subject_end - cur_subject_start >= skip_gap:
+                        break
 
                     # reverse
                     if cur_subject_end < prev_subject_end:
@@ -7247,6 +7912,7 @@ def FMEA_new(query_path, blastn2Results_path, full_length_threshold):
                             reverse_long_frags[cur_frag_index] = extend_frag
                             is_update = True
                 if not is_update:
+                    frag_index_array.append(frag_index)
                     reverse_long_frags[frag_index] = (cur_query_start, cur_query_end, cur_subject_start, cur_subject_end, subject_name)
                     frag_index += 1
             longest_queries += list(reverse_long_frags.values())
@@ -7435,7 +8101,7 @@ def judge_both_ends_frame_v1(maxtrix_file, debug=1):
     is_ltr &= is_left_ltr and is_right_ltr
     return seq_name, is_ltr
 
-def judge_right_frame_LTR(matrix_file, sliding_window_size=20):
+def judge_right_frame_LTR(matrix_file, flanking_len, sliding_window_size=20):
     pos = 0
     debug = 0
     col_num = -1
@@ -7478,7 +8144,7 @@ def judge_right_frame_LTR(matrix_file, sliding_window_size=20):
         if not base_map.__contains__('-'):
             base_map['-'] = 0
 
-    search_len = 100
+    search_len = flanking_len
     valid_col_threshold = int(row_num / 2)
 
     if row_num <= 5:
@@ -7587,8 +8253,8 @@ def judge_right_frame_LTR(matrix_file, sliding_window_size=20):
     else:
         return True, new_boundary_end
 
-def judge_left_frame_LTR(matrix_file, sliding_window_size=20):
-    pos = 99
+def judge_left_frame_LTR(matrix_file, flanking_len, sliding_window_size=20):
+    pos = flanking_len - 1
     debug = 0
     col_num = -1
     row_num = 0
@@ -7629,7 +8295,7 @@ def judge_left_frame_LTR(matrix_file, sliding_window_size=20):
         if not base_map.__contains__('-'):
             base_map['-'] = 0
 
-    search_len = 100
+    search_len = flanking_len
     valid_col_threshold = int(row_num / 2)
 
     if row_num <= 5:
@@ -8130,7 +8796,7 @@ def search_ltr_structure(ltr_name, left_seq, right_seq):
                 has_tsd = True
                 tsd_seq = right_kmer
                 break
-    # print(ltr_name, left_seq, right_seq, has_tgca, has_tsd, tsd_seq)
+    # print(ltr_name, left_seq, right_seq, has_tsd, tsd_seq)
 
     return ltr_name, has_tsd
 
@@ -8280,9 +8946,10 @@ def is_ltr_has_structure(ltr_name, line, ref_seq):
     right_end = min(rLTR_end + left_size, len(ref_seq))
     right_seq = ref_seq[right_start: right_end]
     cur_seq_name, cur_is_tp = search_ltr_structure(ltr_name, left_seq, right_seq)
+    # cur_seq_name, cur_is_tp = search_ltr_structure_low_copy(ltr_name, left_seq, right_seq)
     return cur_seq_name, cur_is_tp
 
-def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, flanking_len, log):
+def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, flanking_len, log, debug):
     true_ltr_names = []
     ltr_dict = {}
     with open(output_path, 'r') as f_r:
@@ -8343,6 +9010,10 @@ def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, le
         remain_candidate_tirs = find_tir_in_ltr(blastnResults_path, candidate_ltr_path, confident_tir_path)
         confident_tirs.update(remain_candidate_tirs)
 
+        if not debug:
+            os.system('rm -f ' + blastnResults_path)
+            os.system('rm -rf ' + temp_blast_dir)
+
     filter_ltr_names = []
     for ltr_name in true_ltr_names:
         if ltr_name in confident_tirs:
@@ -8358,7 +9029,12 @@ def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, le
         for ltr_name in ltr_dict.keys():
             f_save.write(ltr_name+'\t'+str(ltr_dict[ltr_name])+'\n')
 
-def filter_helitron(output_path, helitron_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, project_dir, flanking_len, log):
+    if not debug:
+        os.system('rm -f ' + candidate_tir_path)
+        os.system('rm -f ' + candidate_ltr_path)
+
+
+def filter_helitron(output_path, helitron_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, project_dir, flanking_len, log, debug):
     true_ltr_names = []
     ltr_dict = {}
     with open(output_path, 'r') as f_r:
@@ -8400,6 +9076,11 @@ def filter_helitron(output_path, helitron_output_path, full_length_output_dir, t
     # 检查 候选 Helitron 是否具有 Helitron发卡环等 结构。至此，我们获得了有结构支持的Helitron转座子
     all_confident_helitrons = get_confident_Helitron(candidate_helitron_path, tmp_helitron_path, project_dir, HS_temp_dir, EA_temp_dir, flanking_len, threads)
 
+    if not debug:
+        os.system('rm -f ' + tmp_helitron_path)
+        os.system('rm -rf ' + HS_temp_dir)
+        os.system('rm -rf ' + EA_temp_dir)
+
     # 剩余的序列都当作候选的LTR转座子
     candidate_ltrs = {}
     confident_helitrons = {}
@@ -8422,6 +9103,10 @@ def filter_helitron(output_path, helitron_output_path, full_length_output_dir, t
         remain_candidate_helitrons = find_tir_in_ltr(blastnResults_path, candidate_ltr_path, confident_helitron_path)
         confident_helitrons.update(remain_candidate_helitrons)
 
+        if not debug:
+            os.system('rm -f ' + blastnResults_path)
+            os.system('rm -rf ' + temp_blast_dir)
+
     filter_ltr_names = []
     for ltr_name in true_ltr_names:
         if ltr_name in confident_helitrons:
@@ -8439,7 +9124,11 @@ def filter_helitron(output_path, helitron_output_path, full_length_output_dir, t
         for ltr_name in ltr_dict.keys():
             f_save.write(ltr_name+'\t'+str(ltr_dict[ltr_name])+'\n')
 
-def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, flanking_len, log):
+    if not debug:
+        os.system('rm -f ' + candidate_helitron_path)
+        os.system('rm -f ' + candidate_ltr_path)
+
+def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, flanking_len, log, debug):
     true_ltr_names = []
     ltr_dict = {}
     with open(output_path, 'r') as f_r:
@@ -8489,6 +9178,10 @@ def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, 
         remain_candidate_tirs = find_tir_in_ltr(blastnResults_path, candidate_ltr_path, confident_sine_path)
         confident_sines.update(remain_candidate_tirs)
 
+        if not debug:
+            os.system('rm -f ' + blastnResults_path)
+            os.system('rm -rf ' + temp_blast_dir)
+
     filter_ltr_names = []
     for ltr_name in true_ltr_names:
         if ltr_name in confident_sines:
@@ -8504,6 +9197,8 @@ def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, 
         for ltr_name in ltr_dict.keys():
             f_save.write(ltr_name+'\t'+str(ltr_dict[ltr_name])+'\n')
 
+    if not debug:
+        os.system('rm -f ' + candidate_ltr_path)
 
 def filter_tir_by_tsd(dl_output_path, tsd_output_path, matrix_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir,
                       log):
@@ -8574,7 +9269,7 @@ def filter_tir_by_tsd(dl_output_path, tsd_output_path, matrix_dir, threads, left
         for ltr_name in ltr_dict.keys():
             f_save.write(ltr_name + '\t' + str(ltr_dict[ltr_name]) + '\n')
 
-def find_tir_in_ltr(blastnResults_path, query_path, subject_path, coverage = 0.8):
+def find_tir_in_ltr(blastnResults_path, query_path, subject_path, coverage = 0.95):
     full_length_threshold = coverage
     longest_repeats = FMEA_new(query_path, blastnResults_path, full_length_threshold)
 
@@ -8678,14 +9373,14 @@ def find_files_recursively(root_dir, file_extension=''):
 
     return files
 
-def judge_ltr_from_both_ends_frame(output_dir, output_path, threads, type, log, sliding_window_size=20):
+def judge_ltr_from_both_ends_frame(output_dir, output_path, threads, type, flanking_len, log, sliding_window_size=20):
     file_extension = '.matrix'
     all_matrix_files = find_files_recursively(output_dir, file_extension)
 
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for matrix_file in all_matrix_files:
-        job = ex.submit(judge_both_ends_frame, matrix_file, sliding_window_size, debug=1)
+        job = ex.submit(judge_both_ends_frame, matrix_file, sliding_window_size, flanking_len, debug=1)
         jobs.append(job)
     ex.shutdown(wait=True)
 
@@ -8741,7 +9436,7 @@ def judge_ltr_from_both_ends_frame_for_intactLTR(output_dir, output_path, thread
             f_save.write(cur_name + '\t' + str(true_ltrs[cur_name]) + '\n')
 
 def search_ltr_structure_low_copy(ltr_name, left_seq, right_seq):
-    has_tsd = False
+    has_structure = False
     tsd_lens = [6, 5, 4]
     tsd_seq = ''
     exist_tsd = set()
@@ -8750,21 +9445,21 @@ def search_ltr_structure_low_copy(ltr_name, left_seq, right_seq):
         for i in range(len(left_seq) - k_num + 1):
             left_kmer = left_seq[i: i + k_num]
             tsd_right_seq = left_seq[i + k_num: i + k_num + tsd_motif_distance]
-            if 'N' not in left_kmer and len(set(left_kmer)) != 1: # and 'TG' in tsd_right_seq:
+            if 'N' not in left_kmer and len(set(left_kmer)) != 1 and 'TG' in tsd_right_seq:
                 exist_tsd.add(left_kmer)
     for k_num in tsd_lens:
-        if has_tsd:
+        if has_structure:
             break
         for i in range(len(right_seq) - k_num + 1):
             right_kmer = right_seq[i: i + k_num]
             start_pos = max(i - tsd_motif_distance, 0)
             tsd_left_seq = right_seq[start_pos: i]
-            if 'N' not in right_kmer and right_kmer in exist_tsd: # and 'CA' in tsd_left_seq:
-                has_tsd = True
+            if 'N' not in right_kmer and right_kmer in exist_tsd and 'CA' in tsd_left_seq:
+                has_structure = True
                 tsd_seq = right_kmer
                 break
     # print(ltr_name, left_seq, right_seq, has_tsd, tsd_seq)
-    return ltr_name, has_tsd
+    return ltr_name, has_structure
 
 def filter_ltr_by_structure_low_copy(output_path, structure_output_path, leftLtr2Candidates, ltr_lines, reference, threads, log):
     ref_names, ref_contigs = read_fasta(reference)
@@ -8882,22 +9577,22 @@ def judge_ltr_has_structure(lc_output_path, structure_output_path, leftLtr2Candi
         for ltr_name in ltr_dict.keys():
             f_save.write(ltr_name + '\t' + str(ltr_dict[ltr_name]) + '\n')
 
-def judge_both_ends_frame(maxtrix_file, sliding_window_size, debug=1):
+def judge_both_ends_frame(maxtrix_file, sliding_window_size, flanking_len, debug=1):
     # 我现在想的假阳性过滤方法：
     # 1. 对matrix file 搜索同源边界，如果不存在，则说明是真实LTR，否则为假阳性
     is_ltr = True
     seq_name = os.path.basename(maxtrix_file).split('.')[0]
     # Step3. 对候选随机序列 搜索同源边界。我们将窗口设置为20.
-    is_left_ltr, new_boundary_start = judge_left_frame_LTR(maxtrix_file, sliding_window_size=sliding_window_size)
+    is_left_ltr, new_boundary_start = judge_left_frame_LTR(maxtrix_file, flanking_len, sliding_window_size=sliding_window_size)
     # if debug:
     #     print('left', maxtrix_file, is_left_ltr, new_boundary_start)
-    is_right_ltr, new_boundary_end = judge_right_frame_LTR(maxtrix_file, sliding_window_size=sliding_window_size)
+    is_right_ltr, new_boundary_end = judge_right_frame_LTR(maxtrix_file, flanking_len, sliding_window_size=sliding_window_size)
     # if debug:
     #     print('right', maxtrix_file, is_right_ltr, new_boundary_end)
     is_ltr &= is_left_ltr and is_right_ltr
     return seq_name, is_ltr
 
-def alter_deep_learning_results(dl_output_path, hc_output_path, alter_dl_output_path, log):
+def alter_deep_learning_results(dl_output_path, hc_output_path, alter_dl_output_path, high_copy_output_dir, log):
     ltr_dict1 = {}
     if file_exist(dl_output_path):
         with open(dl_output_path, 'r') as f_r:
@@ -8918,7 +9613,15 @@ def alter_deep_learning_results(dl_output_path, hc_output_path, alter_dl_output_
                 is_ltr = int(parts[1])
                 ltr_dict2[ltr_name] = is_ltr
 
-    if len(ltr_dict1) == 0:
+    if len(ltr_dict1) == 0 and len(ltr_dict2) == 0:
+        # 如果同源搜索模块和深度学习模块同时不执行
+        file_extension = '.matrix'
+        all_matrix_files = find_files_recursively(high_copy_output_dir, file_extension)
+        ltr_dict = {}
+        for matrix_file in all_matrix_files:
+            seq_name = os.path.basename(matrix_file).split('.')[0]
+            ltr_dict[seq_name] = 1
+    elif len(ltr_dict1) == 0:
         ltr_dict = ltr_dict2
         log.logger.debug('No deep learning prediction is found, use the homology rule prediction result.')
     elif len(ltr_dict2) == 0:
@@ -9021,7 +9724,7 @@ def judge_scn_line_by_flank_seq_v1(candidate_index, ref_seq, parts):
     left_ltr = ref_seq[lLTR_start - extend_len: lLTR_end + extend_len]
     right_ltr = ref_seq[rLTR_start - extend_len: rLTR_end + extend_len]
 
-    blastn_command = f"blastn -subject <(echo -e \"{left_ltr}\") -query <(echo -e \"{right_ltr}\") -outfmt 6 -num_threads 1"
+    blastn_command = f"blastn -subject <(echo -e \"{right_ltr}\") -query <(echo -e \"{left_ltr}\") -outfmt 6 -num_threads 1"
     result = subprocess.run(blastn_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, executable='/bin/bash')
 
     # 我们定义好LTR的三个区域，以此判断比对落在哪个区域：
@@ -9071,7 +9774,7 @@ def judge_scn_line_by_flank_seq_v1(candidate_index, ref_seq, parts):
                     is_subject_LTR_region = True
                     s_start_offset = s_start - extend_len
                     s_end_offset = s_end + 1 - (rLTR_len + extend_len)
-                elif s_start <= (extend_len + lLTR_len) and (extend_len + rLTR_len + 2 * error_region_len) <= s_end <= (2 * extend_len + rLTR_len):
+                elif s_start <= (extend_len + rLTR_len) and (extend_len + rLTR_len + 2 * error_region_len) <= s_end <= (2 * extend_len + rLTR_len):
                     is_subject_right_region = True
 
                 if ((is_query_left_region and (is_subject_left_region or is_subject_right_region))
@@ -9084,9 +9787,6 @@ def judge_scn_line_by_flank_seq_v1(candidate_index, ref_seq, parts):
         if not is_LTR_align:
             is_FP = True
 
-        # for i, blastn_line in enumerate(blastn_lines):
-        #     if len(blastn_line) > 0:
-        #         print(blastn_line)
         if not is_FP:
             lLTR_start += q_start_offset
             lLTR_end += q_end_offset
@@ -9102,6 +9802,147 @@ def judge_scn_line_by_flank_seq_v1(candidate_index, ref_seq, parts):
         is_ltr = 1
     return candidate_index, is_ltr, adjust_boundary
 
+
+def judge_scn_line_by_flank_seq_v2(job_list):
+    results = {}
+    for cur_job in job_list:
+        candidate_index, left_ltr, right_ltr, lLTR_len, rLTR_len, lLTR_start, lLTR_end, rLTR_start, rLTR_end = cur_job
+
+        extend_len = 50
+        # 误差区域长度
+        error_region_len = 10
+
+        blastn_command = f"blastn -subject <(echo -e \"{right_ltr}\") -query <(echo -e \"{left_ltr}\") -outfmt 6 -num_threads 1"
+        result = subprocess.run(blastn_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, executable='/bin/bash')
+
+        # 我们判断是否有比对准确落在边界上，收集所有这些比对，然后进行合并，看看覆盖度是否超过终端的95%以上
+        # 如果超过，则认为是真实的LTR终端，否则认为是假阳性的终端
+        adjust_boundary = None
+        q_start_offset = 0
+        q_end_offset = 0
+        s_start_offset = 0
+        s_end_offset = 0
+        precise_boundary_alignments = []
+        if result.returncode == 0:
+            blastn_lines = result.stdout.strip().split('\n')
+            for i, blastn_line in enumerate(blastn_lines):
+                if len(blastn_line) > 0:
+                    parts = str(blastn_line).split('\t')
+                    q_start = int(parts[6])
+                    q_end = int(parts[7])
+                    s_start = int(parts[8])
+                    s_end = int(parts[9])
+                    # 比对落在了左侧边界上
+                    if (((extend_len - error_region_len) <= q_start <= (extend_len + error_region_len)
+                            and q_end <= (extend_len + lLTR_len + error_region_len)
+                            and (extend_len - error_region_len) <= s_start <= (extend_len + error_region_len)
+                            and s_end <= (extend_len + rLTR_len + error_region_len))):
+                        q_start_offset = q_start - extend_len
+                        s_start_offset = s_start - extend_len
+                        precise_boundary_alignments.append((q_start, q_end))
+                     # 比对落在了右侧边界上
+                    if (((extend_len - error_region_len) <= q_start
+                            and (extend_len + lLTR_len - error_region_len) <= q_end <= (extend_len + lLTR_len + error_region_len)
+                            and (extend_len - error_region_len) <= s_start
+                            and (extend_len + rLTR_len - error_region_len) <= s_end <= (extend_len + rLTR_len + error_region_len))):
+                        q_end_offset = q_end + 1 - (lLTR_len + extend_len)
+                        s_end_offset = s_end + 1 - (rLTR_len + extend_len)
+                        precise_boundary_alignments.append((q_start, q_end))
+
+        # 合并 precise_boundary_alignments 坐标后，判断是否覆盖 lLTR_len 的 95%
+        merged_alignments = merge_intervals(precise_boundary_alignments)
+        cover_len = sum(end - start for start, end in merged_alignments)
+        if float(cover_len)/lLTR_len >= 0.9:
+            is_FP = False
+
+            lLTR_start += q_start_offset
+            lLTR_end += q_end_offset
+            rLTR_start += s_start_offset
+            rLTR_end += s_end_offset
+            if q_start_offset != 0 or q_end_offset != 0 or s_start_offset != 0 or s_end_offset != 0:
+                adjust_boundary = (lLTR_start, lLTR_end, rLTR_start, rLTR_end)
+        else:
+            is_FP = True
+
+        if is_FP:
+            is_ltr = 0
+        else:
+            is_ltr = 1
+
+        results[candidate_index] = (is_ltr, adjust_boundary)
+    return results
+
+def filter_ltr_by_flank_seq_v2(scn_file, filter_scn, reference, threads, log):
+    ref_names, ref_contigs = read_fasta(reference)
+    ltr_candidates, ltr_lines = read_scn(scn_file, log)
+
+    job_list = []
+    for candidate_index in ltr_lines.keys():
+        line = ltr_lines[candidate_index]
+        parts = line.split(' ')
+        chr_name = parts[11]
+        ref_seq = ref_contigs[chr_name]
+        extend_len = 50
+        lLTR_start = int(parts[3])
+        lLTR_end = int(parts[4])
+        lLTR_len = int(parts[5])
+        rLTR_start = int(parts[6])
+        rLTR_end = int(parts[7])
+        rLTR_len = int(parts[8])
+        left_ltr = ref_seq[lLTR_start - extend_len: lLTR_end + extend_len]
+        right_ltr = ref_seq[rLTR_start - extend_len: rLTR_end + extend_len]
+        job_list.append((candidate_index, left_ltr, right_ltr, lLTR_len, rLTR_len, lLTR_start, lLTR_end, rLTR_start, rLTR_end))
+
+    part_size = len(job_list) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(job_list[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(job_list[(threads - 1) * part_size:])
+
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for cur_job_list in divided_job_list:
+        job = ex.submit(judge_scn_line_by_flank_seq_v2, cur_job_list)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    all_results = {}
+    for job in as_completed(jobs):
+        cur_results = job.result()
+        all_results.update(cur_results)
+
+    adjust_boundaries = {}
+    is_ltrs = {}
+    fp_count = 0
+    for candidate_index in all_results.keys():
+        is_ltr, adjust_boundary = all_results[candidate_index]
+        if is_ltr == 0:
+            fp_count += 1
+        is_ltrs[candidate_index] = is_ltr
+        adjust_boundaries[candidate_index] = adjust_boundary
+
+    confident_lines = []
+    for candidate_index in ltr_lines.keys():
+        is_ltr = is_ltrs[candidate_index]
+        if is_ltr == 1:
+            line = ltr_lines[candidate_index]
+            confident_lines.append(line)
+            # 生成新的调整边界后的记录
+            adjust_boundary = adjust_boundaries[candidate_index]
+            if adjust_boundary is not None:
+                parts = line.split(' ')
+                parts[3] = str(adjust_boundary[0])
+                parts[4] = str(adjust_boundary[1])
+                parts[5] = str(adjust_boundary[1] - adjust_boundary[0] + 1)
+                parts[6] = str(adjust_boundary[2])
+                parts[7] = str(adjust_boundary[3])
+                parts[8] = str(adjust_boundary[3] - adjust_boundary[2] + 1)
+                new_line = ' '.join(parts)
+                confident_lines.append(new_line)
+    store_scn(confident_lines, filter_scn)
+    if log is not None:
+        log.logger.debug('Remove False Positive LTR terminal: ' + str(fp_count) + ', remaining LTR num: ' + str(len(confident_lines)))
 
 def filter_ltr_by_flank_seq_v1(scn_file, filter_scn, reference, threads, log):
     ref_names, ref_contigs = read_fasta(reference)
@@ -9354,3 +10195,125 @@ def get_intact_ltr_copies(ltr_copies, ltr_lines, full_length_threshold, referenc
                 filtered_copies.append((chr_name_i, start_i, end_i))
         intact_ltr_copies[ltr_name] = filtered_copies
     return intact_ltr_copies
+
+def get_ltr_from_line(cur_internal_seqs):
+    all_lines = {}
+    for candidate_index, lLTR_end, int_seq, chr_name, seq_id, line in cur_internal_seqs:
+        blastn_command = f"blastn -subject <(echo -e \"{int_seq}\") -query <(echo -e \"{int_seq}\") -outfmt 6 -evalue 1e-20 -num_threads 1"
+        result = subprocess.run(blastn_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                executable='/bin/bash')
+
+        new_lines = []
+        new_lines.append(line.split(' '))
+        # 解析比对，获取超过300bp的LTR序列
+        if result.returncode == 0:
+            blastn_lines = result.stdout.strip().split('\n')
+            for i, blastn_line in enumerate(blastn_lines):
+                if len(blastn_line) > 0:
+                    # print(blastn_line)
+                    parts = blastn_line.split('\t')
+                    q_start = int(parts[6])
+                    q_end = int(parts[7])
+                    q_len = abs(q_end - q_start)
+                    s_start = int(parts[8])
+                    s_end = int(parts[9])
+                    s_len = abs(s_end - s_start)
+                    identity = float(parts[2])
+                    if identity > 95 and q_len > 300 and s_len > 300 and q_end > q_start and s_end > s_start and s_start - q_end > 500:
+                        new_lLTR_start = lLTR_end + q_start
+                        new_lLTR_end = lLTR_end + q_end
+                        new_rLTR_start = lLTR_end + s_start
+                        new_rLTR_end = lLTR_end + s_end
+                        # print(new_lLTR_start, new_lLTR_end, new_rLTR_start, new_rLTR_end)
+                        new_line = [new_lLTR_start, new_rLTR_end, new_rLTR_end - new_lLTR_start + 1,
+                                    new_lLTR_start, new_lLTR_end, new_lLTR_end - new_lLTR_start + 1,
+                                    new_rLTR_start, new_rLTR_end, new_rLTR_end - new_rLTR_start + 1,
+                                    identity, seq_id, chr_name]
+                        new_lines.append(new_line)
+        new_lines.sort(key=lambda x: (int(x[0]), -int(x[1])))
+        filtered_new_lines = []
+        # 去掉重复元素
+        for i in range(len(new_lines) - 1, -1, -1):
+            cur_item = new_lines[i]
+            cur_lLTR_start = int(cur_item[0])
+            cur_rLTR_end = int(cur_item[1])
+            cur_LTR_len = int(cur_item[2])
+            is_redundant = False
+            for j in range(i - 1, -1, -1):
+                next_item = new_lines[j]
+                next_lLTR_start = int(next_item[0])
+                next_rLTR_end = int(next_item[1])
+                next_LTR_len = int(next_item[2])
+                overlap_start = max(cur_lLTR_start, next_lLTR_start)
+                overlap_end = min(cur_rLTR_end, next_rLTR_end)
+                overlap_length = overlap_end - overlap_start + 1
+                # 判断是否冗余（即 95% 的拷贝 i 被包含在拷贝 j 中）
+                if overlap_length >= 0.95 * cur_LTR_len and overlap_length >= 0.95 * next_LTR_len:
+                    is_redundant = True
+                    break
+            if not is_redundant:
+                filtered_new_lines.append(cur_item)
+
+        new_line_strs = []
+        for new_line in reversed(filtered_new_lines):
+            new_line_strs.append(' '.join(map(str, new_line)))
+        all_lines[candidate_index] = new_line_strs
+    return all_lines
+
+def get_all_potential_ltr_lines(confident_lines, reference, threads, temp_path, log):
+    ref_names, ref_contigs = read_fasta(reference)
+
+    part_size = len(confident_lines) // threads
+    result = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        result.append(confident_lines[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    result.append(confident_lines[(threads - 1) * part_size:])
+
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    candidate_index = 0
+    for cur_lines in result:
+        cur_internal_seqs = []
+        for cur_line in cur_lines:
+            parts = cur_line.split(' ')
+            chr_name = parts[11]
+            ref_seq = ref_contigs[chr_name]
+            seq_id = parts[10]
+            lLTR_start = int(parts[3])
+            lLTR_end = int(parts[4])
+            rLTR_start = int(parts[6])
+            rLTR_end = int(parts[7])
+            int_seq = ref_seq[lLTR_end: rLTR_start]
+            cur_internal_seqs.append((candidate_index, lLTR_end, int_seq, chr_name, seq_id, cur_line))
+            candidate_index += 1
+
+        job = ex.submit(get_ltr_from_line, cur_internal_seqs)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+    all_lines = {}
+    temp_lines = {}
+    for job in as_completed(jobs):
+        cur_all_lines = job.result()
+        all_lines.update(cur_all_lines)
+
+    for candidate_index in all_lines.keys():
+        new_lines = all_lines[candidate_index]
+        if len(new_lines) > 1:
+            temp_lines[candidate_index] = new_lines
+
+    # 把ltr_copies存成文件
+    with open(temp_path, 'w', encoding='utf-8') as f:
+        json.dump(temp_lines, f, ensure_ascii=False, indent=4)
+
+    new_confident_lines = []
+    for i in range(len(confident_lines)):
+        new_lines = all_lines[i]
+        for cur_line in new_lines:
+            new_confident_lines.append(cur_line)
+
+    if log is not None:
+        log.logger.info('Find all potential LTR, raw ltr num:' + str(len(confident_lines)) + ', current ltr num:' + str(len(new_confident_lines)))
+    return new_confident_lines
+

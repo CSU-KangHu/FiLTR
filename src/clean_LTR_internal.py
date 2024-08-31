@@ -10,8 +10,7 @@ configs_folder = os.path.join(current_folder, "..")
 sys.path.append(configs_folder)
 
 from configs import config
-from Util import multi_process_align_blastx, read_fasta, get_overlap_len, merge_overlap_seq, store_fasta
-from utils.data_util import get_domain_info
+from Util import multi_process_align_blastx, read_fasta, get_overlap_len, merge_overlap_seq, store_fasta, get_domain_info
 
 def merge_intervals(intervals):
     """
@@ -115,7 +114,7 @@ def purge_internal_seq_by_table(query_path, subject_path, clean_query_path, tabl
                 q_end = tmp
             s_start = int(parts[4])
             s_end = int(parts[5])
-            if float(abs(s_end-s_start))/subject_len >= 0.5:
+            if float(abs(s_end-s_start))/subject_len >= 0.95:
                 if not query_records.__contains__(query_name):
                     query_records[query_name] = []
                 subject_pos = query_records[query_name]
