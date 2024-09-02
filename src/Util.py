@@ -952,7 +952,7 @@ def generate_both_ends_frame_from_seq(candidate_sequence_path, reference, flanki
     ex.shutdown(wait=True)
 
     for job in as_completed(jobs):
-        left_frame_path = job.result()
+        both_end_frame_paths = job.result()
 
     if not debug:
         os.system('rm -rf ' + temp_dir)
@@ -1594,6 +1594,16 @@ def read_matrix_file(matrix_file):
     return align_names, align_contigs
 
 
+def judge_boundary_v5_batch(job_list, full_length_output_dir, TE_type, flanking_len):
+    results = []
+    for ltr_name in job_list:
+        cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
+        if not os.path.exists(cur_matrix_file):
+            continue
+        ltr_name, is_TE, info, final_cons_seq = judge_boundary_v5(cur_matrix_file, ltr_name, TE_type, flanking_len)
+        results.append((ltr_name, is_TE, info, final_cons_seq))
+    return results
+
 def judge_boundary_v5(matrix_file, ltr_name, TE_type, flanking_len):
     align_names, align_contigs = read_matrix_file(matrix_file)
 
@@ -1820,6 +1830,18 @@ def judge_boundary_v5(matrix_file, ltr_name, TE_type, flanking_len):
     if debug:
         print(matrix_file, is_TE, final_boundary_start, final_boundary_end)
     return ltr_name, is_TE, '', final_cons_seq
+
+
+
+def judge_boundary_v6_batch(job_list, full_length_output_dir, flanking_len):
+    results = []
+    for ltr_name in job_list:
+        cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
+        if not os.path.exists(cur_matrix_file):
+            continue
+        ltr_name, is_TE, info, final_cons_seq = judge_boundary_v6(cur_matrix_file, ltr_name, flanking_len)
+        results.append((ltr_name, is_TE, info, final_cons_seq))
+    return results
 
 def judge_boundary_v6(matrix_file, ltr_name, flanking_len):
     align_names, align_contigs = read_matrix_file(matrix_file)
@@ -6014,8 +6036,7 @@ def remove_copies_from_redundant_contig_v1(intact_ltr_copies, reference, temp_di
         os.makedirs(temp_dir)
     ref_names, ref_contigs = read_fasta(reference)
 
-    ex = ProcessPoolExecutor(threads)
-    jobs = []
+    all_list = []
     for ltr_name in intact_ltr_copies.keys():
         cur_left_copy_path = temp_dir + '/' + ltr_name + '.left_copies'
         cur_right_copy_path = temp_dir + '/' + ltr_name + '.right_copies'
@@ -6034,15 +6055,37 @@ def remove_copies_from_redundant_contig_v1(intact_ltr_copies, reference, temp_di
             copy_name_2_copy_dict[cur_copy_name] = cur_copy
         store_fasta(cur_left_copy_contigs, cur_left_copy_path)
         store_fasta(cur_right_copy_contigs, cur_right_copy_path)
+        all_list.append((ltr_name, cur_left_copy_contigs, cur_left_copy_path, cur_right_copy_contigs, cur_right_copy_path, copy_name_2_copy_dict))
 
-        job = ex.submit(get_non_redundant_copies_v1, ltr_name, cur_left_copy_contigs, cur_left_copy_path, cur_right_copy_contigs, cur_right_copy_path, copy_name_2_copy_dict)
+    part_size = len(all_list) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(all_list[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(all_list[(threads - 1) * part_size:])
+
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for job_list in divided_job_list:
+        job = ex.submit(get_non_redundant_copies_v1_batch, job_list)
         jobs.append(job)
     ex.shutdown(wait=True)
     intact_ltr_copies = {}
     for job in as_completed(jobs):
-        ltr_name, cur_intact_ltr_copies = job.result()
-        intact_ltr_copies[ltr_name] = cur_intact_ltr_copies
+        results = job.result()
+        for ltr_name, cur_intact_ltr_copies in results:
+            intact_ltr_copies[ltr_name] = cur_intact_ltr_copies
     return intact_ltr_copies
+
+
+def get_non_redundant_copies_v1_batch(job_list):
+    results = []
+    for ltr_name, cur_left_copy_contigs, cur_left_copy_path, cur_right_copy_contigs, cur_right_copy_path, copy_name_2_copy_dict in job_list:
+        ltr_name, intact_copies = get_non_redundant_copies_v1(ltr_name, cur_left_copy_contigs, cur_left_copy_path, cur_right_copy_contigs,
+                                    cur_right_copy_path, copy_name_2_copy_dict)
+        results.append((ltr_name, intact_copies))
+    return results
 
 def get_non_redundant_copies_v1(ltr_name, cur_left_copy_contigs, cur_left_copy_path, cur_right_copy_contigs, cur_right_copy_path, copy_name_2_copy_dict):
     blastn_command = 'blastn -query ' + cur_left_copy_path + ' -subject ' + cur_left_copy_path + ' -num_threads ' + str(1) + ' -outfmt 6 '
@@ -6201,16 +6244,19 @@ def filter_ltr_by_copy_num_sub(candidate_sequence_path, threads, temp_dir, split
         split_files.append(cur_file)
         batch_id += 1
 
+
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for cur_split_files in split_files:
-        job = ex.submit(get_full_length_copies_v1, cur_split_files, split_ref_dir, max_copy_num, full_length_threshold, debug)
+        job = ex.submit(get_full_length_copies_v1, cur_split_files, split_ref_dir, max_copy_num, full_length_threshold,
+                        debug)
         jobs.append(job)
     ex.shutdown(wait=True)
     all_copies = {}
     for job in as_completed(jobs):
         cur_all_copies = job.result()
         all_copies.update(cur_all_copies)
+
     return all_copies
 
 def get_domain_info(cons, lib, output_table, threads, temp_dir):
@@ -6222,11 +6268,12 @@ def get_domain_info(cons, lib, output_table, threads, temp_dir):
     # 1. blastx -num_threads 1 -evalue 1e-20
     partitions_num = int(threads)
     split_files = split_fasta(cons, temp_dir, partitions_num)
+
     merge_distance = 300
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for partition_index, cur_consensus_path in enumerate(split_files):
-        cur_output = temp_dir + '/'+str(partition_index)+'.out'
+        cur_output = temp_dir + '/' + str(partition_index) + '.out'
         cur_table = temp_dir + '/' + str(partition_index) + '.tbl'
         cur_file = (cur_consensus_path, lib, cur_output, cur_table)
         job = ex.submit(multiple_alignment_blastx_v1, cur_file, merge_distance)
@@ -6865,7 +6912,6 @@ def deredundant_for_LTR_v5(redundant_ltr, work_dir, threads, type, coverage_thre
             uncluster_contigs[name] = contigs[name]
     store_fasta(uncluster_contigs, uncluster_path)
 
-
     # 4. The final cluster should encompass all instances from the same family.
     # We use Ninja to cluster families precisely, and
     # We then use the mafft+majority principle to generate a consensus sequence for each cluster.
@@ -7468,6 +7514,7 @@ def cons_from_mafft(align_file):
         #             max_base = cur_base
         #     model_seq += max_base
     return model_seq
+
 
 def generate_cons(cluster_id, cur_cluster_path, cluster_dir, threads):
     ltr_terminal_names, ltr_terminal_contigs = read_fasta(cur_cluster_path)
@@ -8962,25 +9009,31 @@ def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, le
             if is_ltr:
                 true_ltr_names.append(ltr_name)
 
+    part_size = len(true_ltr_names) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(true_ltr_names[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(true_ltr_names[(threads - 1) * part_size:])
+
     # 1. 先在左右窗口中识别同源边界，并搜索 TSD 结构
     # 2. 如果存在，则生成一致性序列，并调用itrsearch判断是否具有终端反向重复结构
     # 检查窗口，是否具有可靠TSD的TIR
     ex = ProcessPoolExecutor(threads)
     jobs = []
-    for ltr_name in true_ltr_names:
-        cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
-        if not os.path.exists(cur_matrix_file):
-            continue
+    for job_list in divided_job_list:
         TE_type = 'tir'
-        job = ex.submit(judge_boundary_v5, cur_matrix_file, ltr_name, TE_type, flanking_len)
+        job = ex.submit(judge_boundary_v5_batch, job_list, full_length_output_dir, TE_type, flanking_len)
         jobs.append(job)
     ex.shutdown(wait=True)
     # 收集候选的 TIR 序列
     candidate_tirs = {}
     for job in as_completed(jobs):
-        cur_seq_name, is_tir, info, cons_seq = job.result()
-        if len(cons_seq) > 0:
-            candidate_tirs[cur_seq_name] = cons_seq
+        results = job.result()
+        for cur_seq_name, is_tir, info, cons_seq in results:
+            if len(cons_seq) > 0:
+                candidate_tirs[cur_seq_name] = cons_seq
 
     candidate_tir_path = tmp_output_dir + '/candidate_tir.fa'
     store_fasta(candidate_tirs, candidate_tir_path)
@@ -9047,25 +9100,28 @@ def filter_helitron(output_path, helitron_output_path, full_length_output_dir, t
             if is_ltr:
                 true_ltr_names.append(ltr_name)
 
-    # 1. 先在左右窗口中识别同源边界，并搜索 TSD 结构
-    # 2. 如果存在，则生成一致性序列，并调用itrsearch判断是否具有终端反向重复结构
-    # 检查窗口，是否具有可靠TSD的TIR
+    part_size = len(true_ltr_names) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(true_ltr_names[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(true_ltr_names[(threads - 1) * part_size:])
+
     ex = ProcessPoolExecutor(threads)
     jobs = []
-    for ltr_name in true_ltr_names:
-        cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
-        if not os.path.exists(cur_matrix_file):
-            continue
+    for job_list in divided_job_list:
         TE_type = 'helitron'
-        job = ex.submit(judge_boundary_v5, cur_matrix_file, ltr_name, TE_type, flanking_len)
+        job = ex.submit(judge_boundary_v5_batch, job_list, full_length_output_dir, TE_type, flanking_len)
         jobs.append(job)
     ex.shutdown(wait=True)
-    # 收集候选的 Helitron 序列
+    # 收集候选的 TIR 序列
     candidate_helitrons = {}
     for job in as_completed(jobs):
-        cur_seq_name, is_tir, info, cons_seq = job.result()
-        if len(cons_seq) > 0:
-            candidate_helitrons[cur_seq_name] = cons_seq
+        results = job.result()
+        for cur_seq_name, is_tir, info, cons_seq in results:
+            if len(cons_seq) > 0:
+                candidate_helitrons[cur_seq_name] = cons_seq
 
     candidate_helitron_path = tmp_output_dir + '/candidate_helitron.fa'
     store_fasta(candidate_helitrons, candidate_helitron_path)
@@ -9141,23 +9197,27 @@ def filter_sine(output_path, sine_output_path, full_length_output_dir, threads, 
             if is_ltr:
                 true_ltr_names.append(ltr_name)
 
-    # 1. 先在左右窗口中识别同源边界，并搜索 TSD 结构
-    # 2. 如果存在，则生成一致性序列
+    part_size = len(true_ltr_names) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(true_ltr_names[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(true_ltr_names[(threads - 1) * part_size:])
+
     ex = ProcessPoolExecutor(threads)
     jobs = []
-    for ltr_name in true_ltr_names:
-        cur_matrix_file = full_length_output_dir + '/' + ltr_name + '.matrix'
-        if not os.path.exists(cur_matrix_file):
-            continue
-        job = ex.submit(judge_boundary_v6, cur_matrix_file, ltr_name, flanking_len)
+    for job_list in divided_job_list:
+        job = ex.submit(judge_boundary_v6_batch, job_list, full_length_output_dir, flanking_len)
         jobs.append(job)
     ex.shutdown(wait=True)
-    # 收集候选的 sine 序列
+    # 收集候选的 TIR 序列
     confident_sines = {}
     for job in as_completed(jobs):
-        cur_seq_name, is_sine, info, cons_seq = job.result()
-        if len(cons_seq) > 0:
-            confident_sines[cur_seq_name] = cons_seq
+        results = job.result()
+        for cur_seq_name, is_sine, info, cons_seq in results:
+            if len(cons_seq) > 0:
+                confident_sines[cur_seq_name] = cons_seq
     confident_sine_path = tmp_output_dir + '/confident_sine.fa'
     store_fasta(confident_sines, confident_sine_path)
 
@@ -9296,15 +9356,9 @@ def find_tir_in_ltr(blastnResults_path, query_path, subject_path, coverage = 0.9
                 break
     return candidate_tirs
 
-def get_low_copy_LTR(output_dir, low_copy_output_dir, copy_num_threshold=3):
-    if os.path.exists(low_copy_output_dir):
-        os.system('rm -rf ' + low_copy_output_dir)
-    if not os.path.exists(low_copy_output_dir):
-        os.makedirs(low_copy_output_dir)
-
-    for name in os.listdir(output_dir):
-        seq_name = name.split('.')[0]
-        matrix_file = output_dir + '/' + name
+def get_low_copy_LTR_sub(job_list, low_copy_output_dir, copy_num_threshold):
+    finished_list = []
+    for matrix_file in job_list:
         cur_copy_num = 0
         with open(matrix_file, 'r') as f_r:
             for line in f_r:
@@ -9312,22 +9366,78 @@ def get_low_copy_LTR(output_dir, low_copy_output_dir, copy_num_threshold=3):
         # 我们增加一个限制，LTR终端的拷贝应该要超过3个
         if cur_copy_num <= copy_num_threshold:
             os.system('cp ' + matrix_file + ' ' + low_copy_output_dir)
+        finished_list.append(matrix_file)
 
-def get_high_copy_LTR(output_dir, high_copy_output_dir, copy_num_threshold=3):
+def get_low_copy_LTR(output_dir, low_copy_output_dir, threads, copy_num_threshold=3):
+    if os.path.exists(low_copy_output_dir):
+        os.system('rm -rf ' + low_copy_output_dir)
+    if not os.path.exists(low_copy_output_dir):
+        os.makedirs(low_copy_output_dir)
+
+    all_matrix_files = []
+    for name in os.listdir(output_dir):
+        matrix_file = output_dir + '/' + name
+        all_matrix_files.append(matrix_file)
+
+    part_size = len(all_matrix_files) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(all_matrix_files[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(all_matrix_files[(threads - 1) * part_size:])
+
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for job_list in divided_job_list:
+        job = ex.submit(get_low_copy_LTR_sub, job_list, low_copy_output_dir, copy_num_threshold)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+
+    for job in as_completed(jobs):
+        finished_list = job.result()
+
+def get_high_copy_LTR_sub(job_list, high_copy_output_dir, copy_num_threshold):
+    finished_list = []
+    for matrix_file in job_list:
+        cur_copy_num = 0
+        with open(matrix_file, 'r') as f_r:
+            for line in f_r:
+                cur_copy_num += 1
+        # 我们增加一个限制，LTR终端的拷贝应该要超过3个
+        if cur_copy_num > copy_num_threshold:
+            os.system('cp ' + matrix_file + ' ' + high_copy_output_dir)
+        finished_list.append(matrix_file)
+
+def get_high_copy_LTR(output_dir, high_copy_output_dir, threads, copy_num_threshold=3):
     if os.path.exists(high_copy_output_dir):
         os.system('rm -rf ' + high_copy_output_dir)
     if not os.path.exists(high_copy_output_dir):
         os.makedirs(high_copy_output_dir)
 
+    all_matrix_files = []
     for name in os.listdir(output_dir):
-        seq_name = name.split('.')[0]
         matrix_file = output_dir + '/' + name
-        cur_copy_num = 0
-        with open(matrix_file, 'r') as f_r:
-            for line in f_r:
-                cur_copy_num += 1
-        if cur_copy_num > copy_num_threshold:
-            os.system('cp ' + matrix_file + ' ' + high_copy_output_dir)
+        all_matrix_files.append(matrix_file)
+
+    part_size = len(all_matrix_files) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(all_matrix_files[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(all_matrix_files[(threads - 1) * part_size:])
+
+    ex = ProcessPoolExecutor(threads)
+    jobs = []
+    for job_list in divided_job_list:
+        job = ex.submit(get_high_copy_LTR_sub, job_list, high_copy_output_dir, copy_num_threshold)
+        jobs.append(job)
+    ex.shutdown(wait=True)
+
+    for job in as_completed(jobs):
+        finished_list = job.result()
+
 
 def random_downsample(data_list, num_samples):
     """
@@ -9377,25 +9487,32 @@ def judge_ltr_from_both_ends_frame(output_dir, output_path, threads, type, flank
     file_extension = '.matrix'
     all_matrix_files = find_files_recursively(output_dir, file_extension)
 
+    part_size = len(all_matrix_files) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(all_matrix_files[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(all_matrix_files[(threads - 1) * part_size:])
+
     ex = ProcessPoolExecutor(threads)
     jobs = []
-    for matrix_file in all_matrix_files:
-        job = ex.submit(judge_both_ends_frame, matrix_file, sliding_window_size, flanking_len, debug=1)
+    for job_list in divided_job_list:
+        job = ex.submit(judge_both_ends_frame_batch, job_list, sliding_window_size, flanking_len, debug=1)
         jobs.append(job)
     ex.shutdown(wait=True)
 
     FP_num = 0
     true_ltrs = {}
     for job in as_completed(jobs):
-        cur_name, cur_is_ltr = job.result()
-        # print(cur_name, cur_is_ltr)
-        # cur_is_ltr = True
-        if cur_is_ltr:
-            cur_is_ltr = 1
-        else:
-            cur_is_ltr = 0
-            FP_num += 1
-        true_ltrs[cur_name] = cur_is_ltr
+        results = job.result()
+        for cur_name, cur_is_ltr in results:
+            if cur_is_ltr:
+                cur_is_ltr = 1
+            else:
+                cur_is_ltr = 0
+                FP_num += 1
+            true_ltrs[cur_name] = cur_is_ltr
 
     if log is not None:
         log.logger.debug(type + ' LTR num: ' + str(len(all_matrix_files)) + ', LTR Homo filter LTR num: ' + str(FP_num) + ', remain LTR num: ' + str(len(all_matrix_files) - FP_num))
@@ -9576,6 +9693,14 @@ def judge_ltr_has_structure(lc_output_path, structure_output_path, leftLtr2Candi
     with open(structure_output_path, 'w') as f_save:
         for ltr_name in ltr_dict.keys():
             f_save.write(ltr_name + '\t' + str(ltr_dict[ltr_name]) + '\n')
+
+def judge_both_ends_frame_batch(job_list, sliding_window_size, flanking_len, debug=1):
+    results = []
+    for maxtrix_file in job_list:
+        seq_name, is_ltr = judge_both_ends_frame(maxtrix_file, sliding_window_size, flanking_len, debug=1)
+        results.append((seq_name, is_ltr))
+    return results
+
 
 def judge_both_ends_frame(maxtrix_file, sliding_window_size, flanking_len, debug=1):
     # 我现在想的假阳性过滤方法：
@@ -9991,6 +10116,15 @@ def filter_ltr_by_flank_seq_v1(scn_file, filter_scn, reference, threads, log):
     if log is not None:
         log.logger.debug('Remove False Positive LTR terminal: ' + str(fp_count) + ', remaining LTR num: ' + str(len(confident_lines)))
 
+def filter_ltr_by_flanking_cluster_sub_batch(job_list, target_dir, temp_dir):
+    results = []
+    for matrix_file in job_list:
+        matrix_file_name = os.path.basename(matrix_file)
+        cur_seq_file = temp_dir + '/' + matrix_file_name + '.fa'
+        cur_seq_cons = cur_seq_file + '.cons'
+        cur_seq_name, cur_is_ltr = filter_ltr_by_flanking_cluster_sub(matrix_file, target_dir, cur_seq_file, cur_seq_cons)
+        results.append((cur_seq_name, cur_is_ltr))
+    return results
 
 def filter_ltr_by_flanking_cluster_sub(matrix_file, target_dir, cur_seq_file, cur_seq_cons):
     cur_seq_name = os.path.basename(matrix_file).split('.')[0]
@@ -10049,23 +10183,30 @@ def filter_ltr_by_flanking_cluster(output_dir, target_dir, temp_dir, threads, lo
     os.system('rm -rf ' + temp_dir)
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
+
+    part_size = len(all_matrix_files) // threads
+    divided_job_list = []
+    # 划分前 n-1 部分
+    for i in range(threads - 1):
+        divided_job_list.append(all_matrix_files[i * part_size: (i + 1) * part_size])
+    # 最后一部分包含剩余的所有元素
+    divided_job_list.append(all_matrix_files[(threads - 1) * part_size:])
+
     ex = ProcessPoolExecutor(threads)
     jobs = []
-    for i, matrix_file in enumerate(all_matrix_files):
-        matrix_file_name = os.path.basename(matrix_file)
-        cur_seq_file = temp_dir + '/' + matrix_file_name + '.fa'
-        cur_seq_cons = cur_seq_file + '.cons'
-        job = ex.submit(filter_ltr_by_flanking_cluster_sub, matrix_file, target_dir, cur_seq_file, cur_seq_cons)
+    for job_list in divided_job_list:
+        job = ex.submit(filter_ltr_by_flanking_cluster_sub_batch, job_list, target_dir, temp_dir)
         jobs.append(job)
     ex.shutdown(wait=True)
 
     input_num = 0
     keep_num = 0
     for job in as_completed(jobs):
-        cur_name, cur_is_ltr = job.result()
-        if cur_is_ltr:
-            keep_num += 1
-        input_num += 1
+        cur_results = job.result()
+        for cur_name, cur_is_ltr in cur_results:
+            if cur_is_ltr:
+                keep_num += 1
+            input_num += 1
     if log is not None:
         log.logger.debug('Input LTR num: ' + str(input_num) + ', keep LTR num: ' + str(keep_num))
 

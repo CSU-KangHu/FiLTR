@@ -2803,7 +2803,7 @@ def sort_matrix_dir(source_dir, target_dir, temp_dir, threads):
         temp_seq = temp_dir + '/' + matrix_file_name + '.fa'
         temp_cons = temp_dir + '/' + matrix_file_name + '.cons'
         sample_list.append((matrix_file, keep_matrix_file, temp_seq, temp_cons))
-    grouped_sample_list = split_list_into_groups(sample_list, 1)
+    grouped_sample_list = split_list_into_groups(sample_list, threads)
 
     jobs = []
     ex = ProcessPoolExecutor(threads)

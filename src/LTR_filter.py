@@ -505,7 +505,7 @@ if __name__ == '__main__':
                     # Step 3.1: Use a rule-based method to filter out low-copy LTRs.
                     log.logger.debug('Step 3.1: Use a rule-based method to filter out low-copy LTRs.')
                     low_copy_output_dir = tmp_output_dir + '/low_copy_frames'
-                    get_low_copy_LTR(output_dir, low_copy_output_dir, copy_num_threshold=5)
+                    get_low_copy_LTR(output_dir, low_copy_output_dir, threads, copy_num_threshold=5)
 
                     type = 'Low copy'
                     judge_ltr_from_both_ends_frame(low_copy_output_dir, lc_output_path, threads, type, flanking_len, log)
@@ -520,7 +520,7 @@ if __name__ == '__main__':
             result_file = high_copy_output_dir
             if not recover or not os.path.exists(result_file):
                 log.logger.debug('Copy high-copy LTR frames for deep learning predicting')
-                get_high_copy_LTR(output_dir, high_copy_output_dir, copy_num_threshold=5)
+                get_high_copy_LTR(output_dir, high_copy_output_dir, threads, copy_num_threshold=5)
             else:
                 log.logger.info(result_file + ' exists, skip...')
 
