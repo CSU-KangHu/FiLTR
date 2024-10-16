@@ -10,9 +10,9 @@ current_folder = os.path.dirname(os.path.abspath(__file__))
 configs_folder = os.path.join(current_folder, "..")
 sys.path.append(configs_folder)
 
-from src.Util import convert_LtrDetector_scn, store_fasta, read_fasta
+from src.Util import convert_LtrDetector_scn, store_fasta, read_fasta, split_chromosomes
 from configs import config
-
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def get_LTR_seq_from_scn(ref_contigs, scn_path, ltr_path):
     LTR_seqs = {}
@@ -45,6 +45,12 @@ def get_LTR_seq_from_scn(ref_contigs, scn_path, ltr_path):
     f_r.close()
     store_fasta(LTR_seqs, ltr_path)
 
+def run_LtrDetector(fasta_dir, LtrDetector_home, output_dir):
+    # Step2. run LtrDetector parallel
+    LtrDetector_command = LtrDetector_home + '/LtrDetector -fasta ' + fasta_dir + ' -destDir ' + output_dir + ' -nThreads ' + str(1)
+    os.system(LtrDetector_command)
+    return 1
+
 if __name__ == '__main__':
     tool_name = 'LtrDetector parallel'
     version_num = '1.0.0'
@@ -62,7 +68,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     genome_path = args.genome
     genome_dir = args.genome_dir
-    threads = args.threads
+    threads = int(args.threads)
     output_dir = args.out_dir
     LtrDetector_home = args.LtrDetector_home
 
@@ -77,29 +83,35 @@ if __name__ == '__main__':
         os.system('rm -rf ' + output_dir)
     os.makedirs(output_dir)
 
+
     # Step1. Splitting genome assembly into chunks
-    test_home = os.getcwd()
+    test_home = current_folder
     starttime = time.time()
     split_genome_command = 'cd ' + test_home + ' && python3 ' + test_home + '/split_genome_chunks.py -g ' \
-                           + genome_path + ' --tmp_output_dir ' + genome_dir \
-                           + ' --chrom_seg_length ' + str(chrom_seg_length) + ' --chunk_size ' + str(chunk_size)
+                           + genome_path + ' --tmp_output_dir ' + genome_dir
     os.system(split_genome_command)
     endtime = time.time()
     dtime = endtime - starttime
 
     split_ref_dir = genome_dir + '/ref_chr'
 
-    ref_contigs = {}
-    for name in os.listdir(split_ref_dir):
-        if name.endswith('.fa'):
-            cur_genome = split_ref_dir + '/' + name
-            cur_ref_names, cur_ref_contigs = read_fasta(cur_genome)
-            ref_contigs.update(cur_ref_contigs)
+    # ref_contigs = {}
+    # for name in os.listdir(split_ref_dir):
+    #     if name.endswith('.fa'):
+    #         cur_genome = split_ref_dir + '/' + name
+    #         cur_ref_names, cur_ref_contigs = read_fasta(cur_genome)
+    #         ref_contigs.update(cur_ref_contigs)
 
+    ex = ProcessPoolExecutor(threads)
+    objs = []
+    for partition_index in os.listdir(split_ref_dir):
+        fasta_dir = split_ref_dir + '/' + str(partition_index)
+        obj = ex.submit(run_LtrDetector, fasta_dir, LtrDetector_home, output_dir)
+        objs.append(obj)
+    ex.shutdown(wait=True)
+    for obj in as_completed(objs):
+        cur_res = obj.result()
 
-    # Step2. run LtrDetector parallel
-    LtrDetector_command = LtrDetector_home + '/LtrDetector -fasta ' + split_ref_dir + ' -destDir ' + output_dir + ' -nThreads ' + str(threads)
-    os.system(LtrDetector_command)
 
     # Step3. 合并所有的LtrDetector 结果, 转换 LTRDetector 的输出为scn格式
     total_bed = output_dir + '/total.bed'
@@ -108,11 +120,11 @@ if __name__ == '__main__':
     scn_file = output_dir + '/total.scn'
     convert_LtrDetector_scn(total_bed, scn_file)
 
-    # Step4. 将 scn 中的 left LTR提取出来
-    ltr_path = output_dir + '/LTR.fa'
-    ltr_cons = output_dir + '/LTR.cons'
-    get_LTR_seq_from_scn(ref_contigs, scn_file, ltr_path)
-
-    cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
-                     + ' -G 0 -g 1 -A 80 -i ' + ltr_path + ' -o ' + ltr_cons + ' -T 0 -M 0'
-    os.system(cd_hit_command)
+    # # Step4. 将 scn 中的 left LTR提取出来
+    # ltr_path = output_dir + '/LTR.fa'
+    # ltr_cons = output_dir + '/LTR.cons'
+    # get_LTR_seq_from_scn(ref_contigs, scn_file, ltr_path)
+    #
+    # cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(0.8) \
+    #                  + ' -G 0 -g 1 -A 80 -i ' + ltr_path + ' -o ' + ltr_cons + ' -T 0 -M 0'
+    # os.system(cd_hit_command)

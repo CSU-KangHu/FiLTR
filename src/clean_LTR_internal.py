@@ -210,6 +210,8 @@ if __name__ == '__main__':
     purge_internal_seq_by_table(internal_seq_filter, dna_db, clean_internal_seq, output_table)
     internal_seq_filter = clean_internal_seq
 
+    if os.path.exists(temp_dir):
+        os.system('rm -rf ' + temp_dir)
 
     clean_internal_seq = internal_seq + '.clean'
     os.system('cp ' + internal_seq_filter + ' ' + clean_internal_seq)

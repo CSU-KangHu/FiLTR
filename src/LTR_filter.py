@@ -49,6 +49,7 @@ if __name__ == '__main__':
     default_is_clean_internal = 1
     default_is_remove_nested = 0
     default_is_deredundant = 1
+    default_is_output_lib = 1
     default_recover = 0
 
     default_skip_detect = 0
@@ -114,6 +115,8 @@ if __name__ == '__main__':
                         help='Whether to unpack nested LTRs. default = [ ' + str(default_is_remove_nested) + ' ]')
     parser.add_argument('--is_deredundant', metavar='is_deredundant',
                         help='Whether to generate LTR cons. default = [ ' + str(default_is_deredundant) + ' ]')
+    parser.add_argument('--is_output_lib', metavar='is_output_lib',
+                        help='Whether to output LTR library. default = [ ' + str(default_is_output_lib) + ' ]')
     parser.add_argument('--recover', metavar='is_recover',
                         help='Whether to enable recovery mode to avoid starting from the beginning, 1: true, 0: false. default = [ ' + str(default_recover) + ' ]')
 
@@ -158,6 +161,7 @@ if __name__ == '__main__':
     is_clean_internal = args.is_clean_internal
     is_remove_nested = args.is_remove_nested
     is_deredundant = args.is_deredundant
+    is_output_lib = args.is_output_lib
     recover = args.recover
 
     BM_RM2 = args.BM_RM2
@@ -292,6 +296,11 @@ if __name__ == '__main__':
     else:
         is_deredundant = int(is_deredundant)
 
+    if is_output_lib is None:
+        is_output_lib = default_is_output_lib
+    else:
+        is_output_lib = int(is_output_lib)
+
     if recover is None:
         recover = default_recover
     else:
@@ -341,6 +350,7 @@ if __name__ == '__main__':
     if not recover or not os.path.exists(result_file):
         split_genome_command = 'cd ' + test_home + ' && python3 ' + test_home + '/split_genome_chunks.py -g ' \
                                + reference + ' --tmp_output_dir ' + tmp_output_dir
+        log.logger.debug(split_genome_command)
         os.system(split_genome_command)
     else:
         log.logger.info(result_file + ' exists, skip...')
@@ -591,17 +601,6 @@ if __name__ == '__main__':
             if not debug:
                 os.system('rm -rf ' + full_length_output_dir)
 
-            # # 我们要求完整的LTR必须具备 4-6 bp TSD，没有的话就认为是假阳性
-            # # 由于初始的边界不一定准确，我们按照LTR_retriever的方法，取侧翼 8bp 和 5' end 3bp，共11bp，然后搜索4-6bp TSD，如果没有，再搜索TG CA，如果都没有就当作假阳性过滤
-            # if is_use_structure:
-            #     structure_output_path = tmp_output_dir + '/is_LTR_structure.txt'
-            #     result_file = structure_output_path
-            #     if not recover or not file_exist(result_file):
-            #         filter_ltr_by_structure(output_path, structure_output_path, leftLtr2Candidates, ltr_lines, reference, threads, log)
-            #     else:
-            #         log.logger.info(result_file + ' exists, skip...')
-            #     output_path = structure_output_path
-
             os.system('cat ' + output_path + ' > ' + confident_msa_file)
         else:
             log.logger.info(result_file + ' exists, skip...')
@@ -657,104 +656,84 @@ if __name__ == '__main__':
     store_scn(confident_lines, confident_scn)
     scn_file = confident_scn
 
-    confident_ltr_path = tmp_output_dir + '/confident_ltr.fa'
-    result_file = confident_ltr_path
-    if not recover or not file_exist(result_file):
-        # Step6. 生成LTR library
-        confident_ltr_terminal = tmp_output_dir + '/confident_ltr.terminal.fa'
-        confident_ltr_internal = tmp_output_dir + '/confident_ltr.internal.fa'
-        get_LTR_seq_from_scn(reference, scn_file, confident_ltr_terminal, confident_ltr_internal, dirty_dicts)
+    # Step6. 生成LTR library
+    confident_ltr_terminal = tmp_output_dir + '/confident_ltr.terminal.fa'
+    confident_ltr_internal = tmp_output_dir + '/confident_ltr.internal.fa'
+    confident_ltr_intact = tmp_output_dir + '/intact_LTR.fa'
+    ltr_intact_list = tmp_output_dir + '/intact_LTR.list'
+    get_LTR_seq_from_scn(reference, scn_file, confident_ltr_terminal, confident_ltr_internal, confident_ltr_intact,
+                         dirty_dicts, ltr_intact_list, miu)
 
-        confident_ltr_terminal_cons = confident_ltr_terminal + '.cons'
+    if is_output_lib:
+        confident_ltr_path = tmp_output_dir + '/confident_ltr.fa'
+        result_file = confident_ltr_path
+        if not recover or not file_exist(result_file):
+            confident_ltr_terminal_cons = confident_ltr_terminal + '.cons'
+            terminal_coverage_threshold = 0.95
+            if is_deredundant:
+                # Step7. Remove redundancy from the LTR terminal results.
+                starttime = time.time()
+                log.logger.info('Start step6: Remove LTR terminal redundancy')
+                type = 'terminal'
+                # 对于 terminal 而言，其内部不太可能出现太大的插入删除变异，因此我们只是利用已识别的LTR终端序列去冗余，不再获取拷贝支持
+                deredundant_for_LTR_v5(confident_ltr_terminal, tmp_output_dir, threads, type, terminal_coverage_threshold, debug)
+                endtime = time.time()
+                dtime = endtime - starttime
+                log.logger.info("Running time of step6: %.8s s" % (dtime))
+            else:
+                cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(terminal_coverage_threshold) \
+                                 + ' -G 0 -g 1 -A 80 -i ' + confident_ltr_terminal + ' -o ' + confident_ltr_terminal_cons + ' -T 0 -M 0'
+                os.system(cd_hit_command + ' > /dev/null 2>&1')
+            # rename_fasta(confident_ltr_terminal_cons, confident_ltr_terminal_cons, 'LTR_terminal')
 
-        terminal_coverage_threshold = 0.95
-        if is_deredundant:
-            # Step7. Remove redundancy from the LTR terminal results.
-            starttime = time.time()
-            log.logger.info('Start step6: Remove LTR terminal redundancy')
-            type = 'terminal'
-            # 对于 terminal 而言，其内部不太可能出现太大的插入删除变异，因此我们只是利用已识别的LTR终端序列去冗余，不再获取拷贝支持
-            deredundant_for_LTR_v5(confident_ltr_terminal, tmp_output_dir, threads, type, terminal_coverage_threshold, debug)
-            endtime = time.time()
-            dtime = endtime - starttime
-            log.logger.info("Running time of step6: %.8s s" % (dtime))
-        else:
-            cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(terminal_coverage_threshold) \
-                             + ' -G 0 -g 1 -A 80 -i ' + confident_ltr_terminal + ' -o ' + confident_ltr_terminal_cons + ' -T 0 -M 0'
-            os.system(cd_hit_command + ' > /dev/null 2>&1')
-        # rename_fasta(confident_ltr_terminal_cons, confident_ltr_terminal_cons, 'LTR_terminal')
-
-        if is_remove_nested:
-            # Step6.1 去内部嵌合 LTR 和 Helitron元素。
-            log.logger.info('Start step8: Remove nested LTR and Helitron elements within LTR sequences.')
-            clean_LTR_path = confident_ltr_internal + '.clean_nested'
-            confident_ltr_tmp = tmp_output_dir + '/confident_ltr.tmp.fa'
-            # helitron_lib = project_dir + '/databases/all_helitron.ref'
-            confident_tir_path = tmp_output_dir + '/confident_tir.fa'
-            max_iter_num = 3
-            for i in range(max_iter_num):
-                os.system('cat ' + confident_ltr_terminal_cons + ' ' + confident_ltr_internal + ' > ' + confident_ltr_tmp)
-                # os.system('cat ' + confident_ltr_terminal_cons + ' ' + confident_ltr_internal + ' ' + helitron_lib + ' > ' + confident_ltr_tmp)
-                if file_exist(confident_tir_path):
-                    os.system('cat ' + confident_tir_path + ' >> ' + confident_ltr_tmp)
-                remove_nested_command = 'python ' + src_dir + '/remove_nested_lib.py ' \
+            if is_clean_internal:
+                # Step6.2 清理内部序列。大量的内部序列是由于其他类型的TE插入，或者干脆内部序列就是大量串联重复，我们需要排除这种影响。
+                log.logger.info('Start step7: Clean the internal sequences of LTRs by removing tandem repeats, LINEs, TIRs, and other elements (using proteins).')
+                clean_internal_command = 'python ' + src_dir + '/clean_LTR_internal.py ' \
                                         + ' -t ' + str(threads) \
-                                        + ' --tmp_output_dir ' + tmp_output_dir + ' --max_iter_num ' + str(1) \
-                                        + ' --input1 ' + confident_ltr_tmp \
-                                        + ' --input2 ' + confident_ltr_internal \
-                                        + ' --output ' + clean_LTR_path
-                log.logger.debug(remove_nested_command)
-                os.system(remove_nested_command)
-                confident_ltr_internal = clean_LTR_path
+                                        + ' --tmp_output_dir ' + tmp_output_dir \
+                                        + ' --internal_seq ' + confident_ltr_internal
+                log.logger.debug(clean_internal_command)
+                os.system(clean_internal_command)
+                confident_ltr_internal += '.clean'
 
-        if is_clean_internal:
-            # Step6.2 清理内部序列。大量的内部序列是由于其他类型的TE插入，或者干脆内部序列就是大量串联重复，我们需要排除这种影响。
-            log.logger.info('Start step7: Clean the internal sequences of LTRs by removing tandem repeats, LINEs, TIRs, and other elements (using proteins).')
-            clean_internal_command = 'python ' + src_dir + '/clean_LTR_internal.py ' \
-                                    + ' -t ' + str(threads) \
-                                    + ' --tmp_output_dir ' + tmp_output_dir \
-                                    + ' --internal_seq ' + confident_ltr_internal
-            log.logger.debug(clean_internal_command)
-            os.system(clean_internal_command)
-            confident_ltr_internal += '.clean'
+            confident_ltr_internal_cons = confident_ltr_internal + '.cons'
+            internal_coverage_threshold = 0.8
+            if is_deredundant:
+                # Step7. Remove redundancy from the LTR internal results.
+                starttime = time.time()
+                log.logger.info('Start step6: Remove LTR internal redundancy')
+                type = 'internal'
+                # 对于 internal 而言，其内部可能出现较大的插入删除变异，因此我们要求比较宽松的0.8阈值
+                deredundant_for_LTR_v5(confident_ltr_internal, tmp_output_dir, threads, type, internal_coverage_threshold, debug)
+                endtime = time.time()
+                dtime = endtime - starttime
+                log.logger.info("Running time of step6: %.8s s" % (dtime))
+            else:
+                cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(internal_coverage_threshold) \
+                                 + ' -G 0 -g 1 -A 80 -i ' + confident_ltr_internal + ' -o ' + confident_ltr_internal_cons + ' -T 0 -M 0'
+                os.system(cd_hit_command + ' > /dev/null 2>&1')
+            # rename_fasta(confident_ltr_internal_cons, confident_ltr_internal_cons, 'LTR_internal')
 
-        confident_ltr_internal_cons = confident_ltr_internal + '.cons'
-        internal_coverage_threshold = 0.8
-        if is_deredundant:
-            # Step7. Remove redundancy from the LTR internal results.
-            starttime = time.time()
-            log.logger.info('Start step6: Remove LTR internal redundancy')
-            type = 'internal'
-            # 对于 internal 而言，其内部可能出现较大的插入删除变异，因此我们要求比较宽松的0.8阈值
-            deredundant_for_LTR_v5(confident_ltr_internal, tmp_output_dir, threads, type, internal_coverage_threshold, debug)
-            endtime = time.time()
-            dtime = endtime - starttime
-            log.logger.info("Running time of step6: %.8s s" % (dtime))
+            # Step8. 生成一致性library
+            os.system('cat ' + confident_ltr_terminal_cons + ' ' + confident_ltr_internal_cons + ' > ' + confident_ltr_path)
+
+            if not debug:
+                confident_ltr_terminal = tmp_output_dir + '/confident_ltr.terminal.fa'
+                confident_ltr_internal = tmp_output_dir + '/confident_ltr.internal.fa'
+                os.system('rm -f ' + confident_ltr_terminal + '*')
+                os.system('rm -f ' + confident_ltr_internal + '*')
         else:
-            cd_hit_command = 'cd-hit-est -aS ' + str(0.95) + ' -aL ' + str(0.95) + ' -c ' + str(internal_coverage_threshold) \
-                             + ' -G 0 -g 1 -A 80 -i ' + confident_ltr_internal + ' -o ' + confident_ltr_internal_cons + ' -T 0 -M 0'
-            os.system(cd_hit_command + ' > /dev/null 2>&1')
-        # rename_fasta(confident_ltr_internal_cons, confident_ltr_internal_cons, 'LTR_internal')
+            log.logger.info(result_file + ' exists, skip...')
 
-        # Step8. 生成一致性library
-        os.system('cat ' + confident_ltr_terminal_cons + ' ' + confident_ltr_internal_cons + ' > ' + confident_ltr_path)
-
-        if not debug:
-            confident_ltr_terminal = tmp_output_dir + '/confident_ltr.terminal.fa'
-            confident_ltr_internal = tmp_output_dir + '/confident_ltr.internal.fa'
-            os.system('rm -f ' + confident_ltr_terminal + '*')
-            os.system('rm -f ' + confident_ltr_internal + '*')
-    else:
-        log.logger.info(result_file + ' exists, skip...')
-
-    # Step9. 调用评估方法
-    evaluation_command = 'cd ' + project_dir + ' && python ' + src_dir + '/benchmarking.py --BM_RM2 ' + str(BM_RM2) + ' --BM_EDTA ' + str(BM_EDTA) + ' --BM_HiTE ' + str(BM_HiTE) + ' -t ' + \
-                      str(threads) + ' --TE_lib ' + confident_ltr_path + ' -r ' + reference + \
-                      ' --tmp_output_dir ' + tmp_output_dir + ' --recover ' + str(recover)
-    if EDTA_home is not None and EDTA_home != '':
-        evaluation_command += ' --EDTA_home ' + EDTA_home
-    if species is not None:
-        evaluation_command += ' --species ' + species
-    log.logger.debug(evaluation_command)
-    os.system(evaluation_command)
+        # Step9. 调用评估方法
+        evaluation_command = 'cd ' + project_dir + ' && python ' + src_dir + '/benchmarking.py --BM_RM2 ' + str(BM_RM2) + ' --BM_EDTA ' + str(BM_EDTA) + ' --BM_HiTE ' + str(BM_HiTE) + ' -t ' + \
+                          str(threads) + ' --TE_lib ' + confident_ltr_path + ' -r ' + reference + \
+                          ' --tmp_output_dir ' + tmp_output_dir + ' --recover ' + str(recover)
+        if EDTA_home is not None and EDTA_home != '':
+            evaluation_command += ' --EDTA_home ' + EDTA_home
+        if species is not None:
+            evaluation_command += ' --species ' + species
+        log.logger.debug(evaluation_command)
+        os.system(evaluation_command)
 

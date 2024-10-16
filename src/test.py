@@ -19,6 +19,8 @@ from sklearn import datasets
 from sklearn.manifold import TSNE
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, \
+    confusion_matrix
 
 current_folder = os.path.dirname(os.path.abspath(__file__))
 # 添加 configs 文件夹的路径到 Python 路径
@@ -46,7 +48,7 @@ from Util import judge_both_ends_frame_v1, filter_ltr_by_homo, multi_process_ali
     get_confident_TIR_v1, get_copies_v2, get_domain_info_v1, get_domain_info_v2, remove_copies_from_redundant_contig, \
     remove_copies_from_redundant_contig_v1, is_ltr_has_structure, judge_scn_line_by_flank_seq_v1, \
     judge_scn_line_by_flank_seq_v2, deredundant_for_LTR_v5, get_ltr_from_line, get_all_potential_ltr_lines, \
-    multi_process_align_v1, filter_ltr_by_copy_num_sub
+    multi_process_align_v1, filter_ltr_by_copy_num_sub, alter_deep_learning_results
 from clean_LTR_internal import purge_internal_seq, purge_internal_seq_by_table
 
 
@@ -689,41 +691,172 @@ if __name__ == '__main__':
     # BM_EDTA()
     # BM_HiTE()
 
-    reference = '/home/hukang/HybridLTR/demo/GCF_001433935.1_IRGSP-1.0_genomic.rename.fna'
-    tmp_output_dir = '/home/hukang/HybridLTR/demo/rice_high_FP'
-    threads = 40
-    split_ref_dir = tmp_output_dir + '/ref_chr'
-    full_length_threshold = 0.95
-    confident_lines = [('chr_0:1524180-1531026', '1524180 1531026 6847 1524180 1524621 442 1530585 1531026 442 98.9 12 chr_0')]
+    # identity = 98.0 / 100
+    # miu = float(str(1.3e-8))
+    # time = int(estimate_insert_time(identity, miu))
+    # print(time)
+
+    # threads = 40
+    # species_names = ['Arabidopsis_thaliana', 'Danio_rerio', 'Drosophila_melanogaster', 'Oryza_sativa', 'Zea_mays']
+    # for species_name in species_names:
+    #     orig_dir = '/home/hukang/left_LTR_real_dataset/five_species/' + species_name
+    #     high_copy_dir = '/home/hukang/left_LTR_real_dataset/five_species_high_copy/' + species_name
+    #     if not os.path.exists(high_copy_dir):
+    #         os.makedirs(high_copy_dir)
+    #
+    #     positive_orig_dir = orig_dir + '/positive'
+    #     positive_high_copy_dir = high_copy_dir + '/positive'
+    #     get_high_copy_LTR(positive_orig_dir, positive_high_copy_dir, threads, copy_num_threshold=5)
+    #
+    #     negative_orig_dir = orig_dir + '/negative'
+    #     negative_high_copy_dir = high_copy_dir + '/negative'
+    #     get_high_copy_LTR(negative_orig_dir, negative_high_copy_dir, threads, copy_num_threshold=5)
 
 
-    internal_ltrs = {}
-    intact_ltrs = {}
-    intact_ltr_path = tmp_output_dir + '/intact_ltr.fa'
-    ref_names, ref_contigs = read_fasta(reference)
-    for name, line in confident_lines:
-        parts = line.split(' ')
-        chr_name = parts[11]
-        left_ltr_start = int(parts[3])
-        left_ltr_end = int(parts[4])
-        right_ltr_start = int(parts[6])
-        right_ltr_end = int(parts[7])
 
-        ref_seq = ref_contigs[chr_name]
+    # 我们在果蝇上，调用我们的边界识别方法，计算出precision, recall, f1-score指标
+    species_names = ['Danio_rerio']
+    # species_names = ['Arabidopsis_thaliana', 'Danio_rerio', 'Drosophila_melanogaster', 'Oryza_sativa', 'Zea_mays']
+    for species_name in species_names:
+        print(species_name)
+        tmp_output_dir = '/home/hukang/left_LTR_real_dataset/five_species_high_copy/' + species_name
+        type = 'High copy'
+        log = None
+        threads = 40
+        flanking_len = 100
 
-        intact_ltr_seq = ref_seq[left_ltr_start - 1: right_ltr_end]
-        internal_ltr_seq = ref_seq[left_ltr_end: right_ltr_start - 1]
-        internal_ltrs[name] = internal_ltr_seq
-        if len(intact_ltr_seq) > 0:
-            intact_ltrs[name] = intact_ltr_seq
-    store_fasta(intact_ltrs, intact_ltr_path)
+        # 调用规则的同源方法过滤
+        positive_dir = tmp_output_dir + '/positive'
+        positive_hc_output_path = tmp_output_dir + '/is_LTR_homo.positive.txt'
+        judge_ltr_from_both_ends_frame(positive_dir, positive_hc_output_path, threads, type, flanking_len, log)
 
-    temp_dir = tmp_output_dir + '/intact_ltr_filter'
-    ltr_copies = filter_ltr_by_copy_num_sub(intact_ltr_path, threads, temp_dir, split_ref_dir, full_length_threshold,
-                                            max_copy_num=10)
-    print(ltr_copies)
+        negative_dir = tmp_output_dir + '/negative'
+        negative_hc_output_path = tmp_output_dir + '/is_LTR_homo.negative.txt'
+        judge_ltr_from_both_ends_frame(negative_dir, negative_hc_output_path, threads, type, flanking_len, log)
+
+        # 解析正负样本结果，生成名字和标签对应关系
+        # 获得标准
+        seq_names = []
+        std_labels = {}
+        pred_labels = {}
+        ltr_dict2 = {}
+        with open(positive_hc_output_path, 'r') as f_r:
+            for line in f_r:
+                parts = line.replace('\n', '').split('\t')
+                seq_name = parts[0]
+                pred_label = int(parts[1])
+                real_label = 1
+                std_labels[seq_name] = real_label
+                pred_labels[seq_name] = pred_label
+                ltr_dict2[seq_name] = pred_label
+                seq_names.append(seq_name)
+        with open(negative_hc_output_path, 'r') as f_r:
+            for line in f_r:
+                parts = line.replace('\n', '').split('\t')
+                seq_name = parts[0]
+                pred_label = int(parts[1])
+                real_label = 0
+                std_labels[seq_name] = real_label
+                pred_labels[seq_name] = pred_label
+                ltr_dict2[seq_name] = pred_label
+                seq_names.append(seq_name)
+
+        dl_output_path = tmp_output_dir + '/is_LTR_deep.txt'
+        ltr_dict1 = {}
+        with open(dl_output_path, 'r') as f_r:
+            for line in f_r:
+                if line.startswith('#'):
+                    continue
+                line = line.replace('\n', '')
+                parts = line.split('\t')
+                ltr_name = parts[0]
+                is_ltr = int(parts[2])
+                ltr_dict1[ltr_name] = is_ltr
+
+        print('未调整前Deep learning性能: ')
+        y_test = []
+        y_pred_before = []
+        for name in seq_names:
+            y_test.append(std_labels[name])
+            y_pred_before.append(ltr_dict1[name])
+
+        # compute metrics
+        accuracy = round(accuracy_score(y_test, y_pred_before), 4)
+        precision = round(precision_score(y_test, y_pred_before, average='macro'), 4)
+        recall = round(recall_score(y_test, y_pred_before, average='macro'), 4)
+        f1 = round(f1_score(y_test, y_pred_before, average='macro'), 4)
+        print('accuracy, precision, recall, f1:', accuracy, precision, recall, f1)
+        class_report = classification_report(y_test, y_pred_before)
+        print(class_report)
+        # conf_matrix = confusion_matrix(y_test, y_pred)
+        # print(conf_matrix)
 
 
+
+        print('Adjust the deep learning prediction result using the homology rule prediction result.')
+        for ltr_name in ltr_dict2.keys():
+            is_ltr = ltr_dict2[ltr_name]
+            # 当同源方法预测为 0，即非LTR时，以其预测结果为准
+            if not is_ltr:
+                ltr_dict1[ltr_name] = is_ltr
+
+        y_pred_after = []
+        for name in seq_names:
+            y_pred_after.append(ltr_dict1[name])
+
+
+        # compute metrics
+        accuracy = round(accuracy_score(y_test, y_pred_after), 4)
+        precision = round(precision_score(y_test, y_pred_after, average='macro'), 4)
+        recall = round(recall_score(y_test, y_pred_after, average='macro'), 4)
+        f1 = round(f1_score(y_test, y_pred_after, average='macro'), 4)
+        print('accuracy, precision, recall, f1:', accuracy, precision, recall, f1)
+        class_report = classification_report(y_test, y_pred_after)
+        print(class_report)
+        # conf_matrix = confusion_matrix(y_test, y_pred)
+        # print(conf_matrix)
+
+
+
+
+
+
+
+
+
+    # reference = '/home/hukang/HybridLTR/demo/GCF_001433935.1_IRGSP-1.0_genomic.rename.fna'
+    # tmp_output_dir = '/home/hukang/HybridLTR/demo/rice_high_FP'
+    # threads = 40
+    # split_ref_dir = tmp_output_dir + '/ref_chr'
+    # full_length_threshold = 0.95
+    # confident_lines = [('chr_0:1524180-1531026', '1524180 1531026 6847 1524180 1524621 442 1530585 1531026 442 98.9 12 chr_0')]
+    #
+    #
+    # internal_ltrs = {}
+    # intact_ltrs = {}
+    # intact_ltr_path = tmp_output_dir + '/intact_ltr.fa'
+    # ref_names, ref_contigs = read_fasta(reference)
+    # for name, line in confident_lines:
+    #     parts = line.split(' ')
+    #     chr_name = parts[11]
+    #     left_ltr_start = int(parts[3])
+    #     left_ltr_end = int(parts[4])
+    #     right_ltr_start = int(parts[6])
+    #     right_ltr_end = int(parts[7])
+    #
+    #     ref_seq = ref_contigs[chr_name]
+    #
+    #     intact_ltr_seq = ref_seq[left_ltr_start - 1: right_ltr_end]
+    #     internal_ltr_seq = ref_seq[left_ltr_end: right_ltr_start - 1]
+    #     internal_ltrs[name] = internal_ltr_seq
+    #     if len(intact_ltr_seq) > 0:
+    #         intact_ltrs[name] = intact_ltr_seq
+    # store_fasta(intact_ltrs, intact_ltr_path)
+    #
+    # temp_dir = tmp_output_dir + '/intact_ltr_filter'
+    # ltr_copies = filter_ltr_by_copy_num_sub(intact_ltr_path, threads, temp_dir, split_ref_dir, full_length_threshold,
+    #                                         max_copy_num=10)
+    # print(ltr_copies)
 
 
     # work_dir = '/home/hukang/HybridLTR/demo/rice_high_FP'

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import random
 import re
@@ -63,6 +64,33 @@ def save_dict_to_fasta(data_dict, fasta_file):
             for line in seq_lines:
                 file.write(line + "\n")
 
+def map_chr_position(LTR_detector_scn_file, scn_file, position_map):
+    ltr_candidates, ltr_lines = read_scn(LTR_detector_scn_file, log=None)
+    with open(scn_file, 'w') as f_save:
+        f_save.write('# LtrDetector\n')
+        for candidate_index in ltr_candidates.keys():
+            line = ltr_lines[candidate_index]
+            parts = line.split(' ')
+            ltr_start = int(parts[0])
+            ltr_end = int(parts[1])
+            chr_name = parts[11]
+            left_ltr_start = int(parts[3])
+            left_ltr_end = int(parts[4])
+            right_ltr_start = int(parts[6])
+            right_ltr_end = int(parts[7])
+            raw_chr_name, start, end = position_map[chr_name]
+            parts[0] = str(start + ltr_start)
+            parts[1] = str(start + ltr_end)
+            parts[11] = raw_chr_name
+            parts[3] = str(start + left_ltr_start)
+            parts[4] = str(start + left_ltr_end)
+            parts[6] = str(start + right_ltr_start)
+            parts[7] = str(start + right_ltr_end)
+            new_line = ' '.join(parts)
+            f_save.write(new_line + '\n')
+
+
+
 def split_chromosomes(chromosomes_dict, max_length=400_000_000):
     """
     分割染色体序列，如果序列长度超过max_length，则将其分割成多个部分。
@@ -75,6 +103,7 @@ def split_chromosomes(chromosomes_dict, max_length=400_000_000):
     dict: 一个新的字典，包含分割后的染色体序列。
     """
     new_chromosomes_dict = {}
+    position_map = {}
     for chrom, sequence in chromosomes_dict.items():
         if len(sequence) > max_length:
             num_parts = (len(sequence) + max_length - 1) // max_length  # 计算需要分割的部分数
@@ -83,12 +112,14 @@ def split_chromosomes(chromosomes_dict, max_length=400_000_000):
                 start = i * max_length
                 end = min((i + 1) * max_length, len(sequence))
                 new_chromosomes_dict[part_name] = sequence[start:end]
+                position_map[part_name] = (chrom, start, end)
         else:
             new_chromosomes_dict[chrom] = sequence
-    return new_chromosomes_dict
+            position_map[chrom] = (chrom, 0, len(sequence))
+    return new_chromosomes_dict, position_map
 
 def split_dict_into_blocks(chromosomes_dict, threads):
-    chromosomes_dict = split_chromosomes(chromosomes_dict)
+    # chromosomes_dict = split_chromosomes(chromosomes_dict, max_length=chunk_size)
     total_length = sum(len(seq) for seq in chromosomes_dict.values())
     target_length = total_length // threads
 
@@ -3879,7 +3910,7 @@ def generate_LTR_terminal_info(data_path, work_dir, tool_dir, threads):
     return cur_update_path
 
 # Parse output of LTR_harvest
-def get_LTR_seq_from_scn(genome, scn_path, ltr_terminal, ltr_internal, dirty_dicts, coverage_threshold=0.95):
+def get_LTR_seq_from_scn(genome, scn_path, ltr_terminal, ltr_internal, ltr_intact, dirty_dicts, ltr_intact_list, miu, coverage_threshold=0.95):
     ref_names, ref_contigs = read_fasta(genome)
     ltr_lines = []
     with open(scn_path, 'r') as f_r:
@@ -3922,6 +3953,7 @@ def get_LTR_seq_from_scn(genome, scn_path, ltr_terminal, ltr_internal, dirty_dic
 
     LTR_terminals = {}
     LTR_ints = {}
+    LTR_intacts = {}
     for line in deredundant_lines:
         parts = line.split(' ')
         LTR_start = int(parts[0])
@@ -3934,6 +3966,7 @@ def get_LTR_seq_from_scn(genome, scn_path, ltr_terminal, ltr_internal, dirty_dic
         lLTR_seq = ref_contigs[chr_name][lLTR_start - 1: lLTR_end]
         rLTR_seq = ref_contigs[chr_name][rLTR_start - 1: rLTR_end]
         LTR_int_seq = ref_contigs[chr_name][lLTR_end: rLTR_start - 1]
+        intact_seq = ref_contigs[chr_name][lLTR_start - 1: rLTR_end]
 
         cur_name = chr_name + '-' + str(lLTR_start) + '-' + str(lLTR_end)
         if (len(lLTR_seq) > 0 and len(rLTR_seq) > 0 and len(LTR_int_seq) > 0
@@ -3942,14 +3975,45 @@ def get_LTR_seq_from_scn(genome, scn_path, ltr_terminal, ltr_internal, dirty_dic
             LTR_terminals[lLTR_name] = lLTR_seq
             rLTR_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-rLTR' + '#LTR'
             LTR_terminals[rLTR_name] = rLTR_seq
+            intact_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end)
+            LTR_intacts[intact_name] = intact_seq
             # 如果当前是dirty (内部序列包含其他full-length LTR)，就过滤该内部序列
             if cur_name not in dirty_dicts:
                 LTR_int_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end) + '-int' + '#LTR'
                 LTR_ints[LTR_int_name] = LTR_int_seq
     store_fasta(LTR_ints, ltr_internal)
     store_fasta(LTR_terminals, ltr_terminal)
+    store_fasta(LTR_intacts, ltr_intact)
 
+    with open(ltr_intact_list, 'w') as f_save:
+        header = '#LTR_loc\tMotif\tTSD\tInternal\tIdentity\tInsertion_Time'
+        f_save.write(header + '\n')
+        for line in deredundant_lines:
+            parts = line.split(' ')
+            LTR_start = int(parts[0])
+            LTR_end = int(parts[1])
+            chr_name = parts[11]
+            ref_seq = ref_contigs[chr_name]
+            lLTR_start = int(parts[3])
+            lLTR_end = int(parts[4])
+            rLTR_start = int(parts[6])
+            rLTR_end = int(parts[7])
+            identity = float(parts[9]) / 100
+            insertion_time = int(estimate_insert_time(identity, float(miu)))
+            ltr_name = chr_name + '_' + str(LTR_start) + '-' + str(LTR_end)
+            ltr_name, has_structure, tsd_seq = is_ltr_has_structure(ltr_name, line, ref_seq)
+            motif = ref_seq[lLTR_start - 1: lLTR_start - 1 + 2] + ref_seq[rLTR_end - 2: rLTR_end]
+            if tsd_seq == '':
+                tsd_seq = 'NA'
+            cur_record = ltr_name + '\t' + motif + '\t' + tsd_seq + '\t' + str(lLTR_end) + '-' + str(rLTR_start - 1) + '\t' + str(identity) + '\t' + str(insertion_time)
+            f_save.write(cur_record + '\n')
 
+def estimate_insert_time(identity, miu):
+    # 估计序列的插入时间
+    d = 1 - identity
+    K=  -3/4*math.log(1-d*4/3)
+    T = K/(2*miu)
+    return T
 
 def merge_intervals(intervals):
     # 如果列表为空，直接返回空列表
@@ -5830,7 +5894,7 @@ def filter_single_copy_ltr(output_path, single_copy_internals_file, ltr_copies, 
         parts = line.split(' ')
         chr_name = parts[11]
         ref_seq = ref_contigs[chr_name]
-        ltr_name, has_structure = is_ltr_has_structure(ltr_name, line, ref_seq)
+        ltr_name, has_structure, tsd_seq = is_ltr_has_structure(ltr_name, line, ref_seq)
         is_single_ltr_has_structure[ltr_name] = has_structure
         if not has_structure:
             no_structure_single_count += 1
@@ -6273,6 +6337,8 @@ def get_domain_info(cons, lib, output_table, threads, temp_dir):
     ex = ProcessPoolExecutor(threads)
     jobs = []
     for partition_index, cur_consensus_path in enumerate(split_files):
+        if not file_exist(cur_consensus_path):
+            continue
         cur_output = temp_dir + '/' + str(partition_index) + '.out'
         cur_table = temp_dir + '/' + str(partition_index) + '.tbl'
         cur_file = (cur_consensus_path, lib, cur_output, cur_table)
@@ -8845,7 +8911,7 @@ def search_ltr_structure(ltr_name, left_seq, right_seq):
                 break
     # print(ltr_name, left_seq, right_seq, has_tsd, tsd_seq)
 
-    return ltr_name, has_tsd
+    return ltr_name, has_tsd, tsd_seq
 
 def has_consecutive_repeats_near_tail(sequence, min_repeat_length=2, min_repeats=3, max_distance_from_tail=5):
     """
@@ -8992,9 +9058,9 @@ def is_ltr_has_structure(ltr_name, line, ref_seq):
     right_start = max(rLTR_end - internal_size, 0)
     right_end = min(rLTR_end + left_size, len(ref_seq))
     right_seq = ref_seq[right_start: right_end]
-    cur_seq_name, cur_is_tp = search_ltr_structure(ltr_name, left_seq, right_seq)
+    cur_seq_name, cur_is_tp, tsd_seq = search_ltr_structure(ltr_name, left_seq, right_seq)
     # cur_seq_name, cur_is_tp = search_ltr_structure_low_copy(ltr_name, left_seq, right_seq)
-    return cur_seq_name, cur_is_tp
+    return cur_seq_name, cur_is_tp, tsd_seq
 
 def filter_tir(output_path, tir_output_path, full_length_output_dir, threads, left_LTR_contigs, tmp_output_dir, tool_dir, flanking_len, log, debug):
     true_ltr_names = []
@@ -9929,10 +9995,10 @@ def judge_scn_line_by_flank_seq_v1(candidate_index, ref_seq, parts):
 
 
 def judge_scn_line_by_flank_seq_v2(job_list):
+    ltr_identities = {}
     results = {}
     for cur_job in job_list:
         candidate_index, left_ltr, right_ltr, lLTR_len, rLTR_len, lLTR_start, lLTR_end, rLTR_start, rLTR_end = cur_job
-
         extend_len = 50
         # 误差区域长度
         error_region_len = 10
@@ -9953,6 +10019,7 @@ def judge_scn_line_by_flank_seq_v2(job_list):
             for i, blastn_line in enumerate(blastn_lines):
                 if len(blastn_line) > 0:
                     parts = str(blastn_line).split('\t')
+                    identity = float(parts[2])
                     q_start = int(parts[6])
                     q_end = int(parts[7])
                     s_start = int(parts[8])
