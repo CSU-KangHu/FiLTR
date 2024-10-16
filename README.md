@@ -18,6 +18,11 @@ Recommended OS: (Ubuntu 16.04, CentOS 7, etc.)
 ### <a name="install_conda"></a>Option 1. Run with Conda
 ```sh 
 git clone https://github.com/CSU-KangHu/FiLTR.git ## Alternatively, you can download the zip file directly from the repository.
+
+# compile and make LtrDetector
+cd FiLTR/bin/LtrDetector/src && rm -rf ../bin && make bin && make tr -j
+
+
 cd FiLTR
 chmod +x tools/*
 
@@ -40,12 +45,12 @@ Please refer to [demo](/demo) for the demo data to play with:
 #       confident_ltr.fa: The LTR library.
 python ${pathTo}/FiLTR/main.py \
  --genome ${pathTo}/FiLTR/demo/genome.fa \
- --outdir ${outdir} \
+ --out_dir ${outdir} \
  --thread ${threads_num}
  # e.g., my command: 
  # python /home/hukang/FiLTR/main.py \
  # --genome /home/hukang/FiLTR/demo/genome.fa \
- # --outdir /home/hukang/FiLTR/demo/test \
+ # --out_dir /home/hukang/FiLTR/demo/test \
  # --thread 40
 ```
 Add `> log.txt 2>&1 &` at the end of the command to run it in the background.
