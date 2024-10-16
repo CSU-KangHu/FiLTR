@@ -9,7 +9,7 @@ current_folder = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.join(current_folder, ".")
 
 if __name__ == '__main__':
-    tool_name = 'HybridLTR_pipeline'
+    tool_name = 'FiLTR'
     version_num = '0.0.1'
     default_threads = int(cpu_count())
     default_miu = str(1.3e-8)
@@ -39,7 +39,7 @@ if __name__ == '__main__':
     parser.add_argument('--BM_EDTA', metavar='BM_EDTA', help='Whether to conduct benchmarking of EDTA, 1: true, 0: false. default = [ ' + str(default_BM_EDTA) + ' ]')
     parser.add_argument('--BM_HiTE', metavar='BM_HiTE', help='Whether to conduct benchmarking of HiTE, 1: true, 0: false. default = [ ' + str(default_BM_HiTE) + ' ]')
     parser.add_argument('--EDTA_home', metavar='EDTA_home', help='When conducting benchmarking of EDTA, you will be asked to input EDTA home path.')
-    parser.add_argument('--species', metavar='species', help='Which species you want to conduct benchmarking, six species support (dmel, rice, cb, zebrafish, maize, ath).')
+    parser.add_argument('--species', metavar='species', help='Which species you want to conduct benchmarking.')
 
     args = parser.parse_args()
 
@@ -65,7 +65,7 @@ if __name__ == '__main__':
     src_dir = project_dir + '/src'
     tool_dir = project_dir + '/tools'
 
-    log = Logger(output_dir + '/HybridLTR_pipeline.log', level='debug')
+    log = Logger(output_dir + '/FiLTR.log', level='debug')
 
     if reference is None:
         log.logger.error('\nGenome path can not be empty')
