@@ -1,3 +1,5 @@
+import subprocess
+import psutil
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -6,7 +8,7 @@ import pandas as pd
 import numpy as np
 torch.manual_seed(2024)
 import torch.nn.functional as F
-from mymodel_neuralLTR import CNNCAT 
+from mymodel_neuralLTR import CNNCAT
 import os
 from tqdm import tqdm
 import sys
@@ -20,6 +22,7 @@ import re
 import multiprocessing
 from PIL import Image
 from collections import OrderedDict
+
 
 def generate_kmer_dic(repeat_num):
     ##initiate a dic to store the kmer dic
@@ -93,7 +96,8 @@ def extract_features(file_path):
     chunk_features = []
     chunk_freqs = []
     Ks = [1,2,3,4,5]
-    for file in tqdm(file_path):
+    # for file in tqdm(file_path):
+    for file in file_path:
         ltr_name = file.split('.')[0].split('/')[-1]
         ltr_names.append(ltr_name)
         with open(file, 'r') as fr:
@@ -115,9 +119,9 @@ def extract_features(file_path):
             block_img_right = get_block_img(char_array_right)
             support_img_right = get_support_img(char_array_right)
             base_img_right = get_base_img(char_array_right)
-            
+
             freq_left = get_freq_feature(char_array_left, Ks) # kmer频次特征
-            freq_right = get_freq_feature(char_array_right, Ks) 
+            freq_right = get_freq_feature(char_array_right, Ks)
             freq_feature = np.stack((freq_left, freq_right), axis=0)
             # 中间填上一列 0
             mid_img = np.zeros((100, 1), dtype=int)
@@ -129,7 +133,7 @@ def extract_features(file_path):
 
             chunk_features.append(features)
             chunk_freqs.append(freq_feature)
-            
+
     return chunk_features, chunk_freqs, ltr_names
 
 
@@ -151,45 +155,45 @@ def chunk_data(pos_data, chunk_size1):
         pos_chunk = pos_data[i:i + chunk_size1] if i is not None else []
         yield pos_chunk
 
+
 def align2pileup(file_path):
     # 进程数
     num_processes = 20
     target_files = get_files(file_path)
-    print(len(target_files))
-    if len(target_files) < num_processes:
-        results = [extract_features(target_files)]
-    elif len(target_files) == 0:
+    if len(target_files) == 0:
         raise ValueError("No LTR files found.")
+
+    # 确保数据切块
+    if len(target_files) < num_processes:
+        data_chunks = [target_files]  # 如果文件少于进程数，全部放入一个块
     else:
         chunk_size = len(target_files) // num_processes
         data_chunks = list(chunk_data(target_files, chunk_size))
-        # 创建进程池
-        # pool = multiprocessing.Pool(processes=num_processes)
-        # results = pool.map(extract_features, data_chunks)
-        with multiprocessing.Pool(processes=num_processes) as pool:
-            # 使用 map 方法将 process_array 函数应用于每个数组
-            results = pool.map(extract_features,  data_chunks)
-    img_features = torch.empty((0, 100, 201, 3), dtype=torch.float32)
-    freq_features = torch.empty((0, 2, 3900), dtype=torch.float32)
+
+    # 创建进程池
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        results = pool.map(extract_features, data_chunks)
+
+    # 初始化空张量和列表
+    img_features = []
+    freq_features = []
     seq_names = []
+
+    # 处理结果
     for result in results:
-        # print(result)
-        # print(len(result))
-        # if len(result) == 1:
-        #     chunk_feature, chunk_freq, chunk_name = result[0][0], result[0][1], result[0][2]
-        # else:
-        chunk_feature, chunk_freq, chunk_name = result
-        chunk_feature = torch.tensor(np.array(chunk_feature)) # 图像特征
-        print(chunk_feature.shape)
-        chunk_freq = torch.tensor(np.array(chunk_freq))  # kmer频次特征
-        img_features = torch.cat((img_features, chunk_feature), dim=0)
-        freq_features = torch.cat((freq_features, chunk_freq), dim=0)
-        seq_names.extend(chunk_name)
-    # img_features = img_features.squeeze(0)
-    img_features = img_features.permute(0, 3, 1, 2)
-    # img_features = img_features[:, [1, 2], :, :] # 去掉block_img
-    freq_features = torch.unsqueeze(freq_features, dim=2)
-    return img_features, freq_features, seq_names
+        chunk_features, chunk_freqs, ltr_names = result  # 解包每个结果
+        img_features.extend(chunk_features)  # 将每个特征添加到列表
+        freq_features.extend(chunk_freqs)  # 将每个频次特征添加到列表
+        seq_names.extend(ltr_names)  # 将每个序列名添加到列表
+
+    # 转换为张量
+    img_features_tensor = torch.tensor(np.array(img_features), dtype=torch.float32)
+    freq_features_tensor = torch.tensor(np.array(freq_features), dtype=torch.float32)
+
+    img_features_tensor = img_features_tensor.permute(0, 3, 1, 2)  # 转换维度
+    freq_features_tensor = torch.unsqueeze(freq_features_tensor, dim=2)  # 增加维度
+
+    return img_features_tensor, freq_features_tensor, seq_names
 
 def spilt_filename(pred_file, img_dir):
     name_to_value = {}
@@ -208,36 +212,38 @@ def spilt_filename(pred_file, img_dir):
             # 重命名文件
             os.rename(os.path.join(img_dir, filename), os.path.join(img_dir, new_filename))
 
-def choice_device():
+def get_device():
+    single_feature = 1 # size of a single feature in MiB
     if torch.cuda.is_available():
-        devices = []
+        free_gpus = []
         for i in range(torch.cuda.device_count()):
-            properties = torch.cuda.get_device_properties(i)
-            memory_stats = torch.cuda.memory_stats(i)
-            total_memory = properties.total_memory # 获取总显存
-            allocated_memory_current = memory_stats['allocated_bytes.all.current'] # 当前已分配的显存
-            available_memory = total_memory - allocated_memory_current # 估算当前可用显存
-            devices.append((i, available_memory))
-        device, _ = max(devices, key=lambda x: x[1])
-        max_available_memory = devices[device][1]
-        print(f"Using GPU {device} with the most memory available.")
-        print(f"the available memory is {max_available_memory / (1024 ** 3) }GB.")
-
-        single_datasize = 3 * 200 * 100 + 2 * 1900
-        batch_size = min(128, max_available_memory // single_datasize // 2)
-        print(f"batch_size is {batch_size}.")
-    else:
-        device = torch.device("cpu")
-        print("Using CPU.")
-        batch_size = 33
-   
-    return device, batch_size
+            #  get the current GPU usage information using 'nvidia-smi'
+            gpu_info = subprocess.check_output(['nvidia-smi', '--query-gpu=utilization.gpu,memory.free', '--format=csv,noheader,nounits']).decode('utf-8').strip().split('\n')
+            gpu_usage = gpu_info[i].split(", ")
+            free_memory = int(gpu_usage[1]) # get free memory size
+            if free_memory > 1000:  # we need at least 1000 MiB free memory
+                free_gpus.append((i, free_memory))
+        if free_gpus:
+            free_gpus.sort(key=lambda x: x[1], reverse=True) # sort by free memory
+            selected_gpu = free_gpus[0][0]
+            print(f"Using GPU: {selected_gpu} with {free_gpus[0][1]} MiB free memory.")
+            total_memory = torch.cuda.get_device_properties(selected_gpu).total_memory / (1024 ** 2)  # 转换为 MiB
+            reserved_memory = torch.cuda.memory_reserved(selected_gpu) / (1024 ** 2)
+            available_memory = total_memory - reserved_memory
+            batch_size = max(min(128, int(available_memory // single_feature // 2)), 2)
+            return torch.device(f'cuda:{selected_gpu}'), batch_size
+    memory_info = psutil.virtual_memory()
+    total_memory = memory_info.total / (1024 ** 2)  # switch to MiB
+    available_memory = memory_info.available / (1024 ** 2)  # switch to MiB
+    print(f"No available GPU, using CPU. Total memory: {total_memory:.2f} MiB, available memory: {available_memory:.2f} MiB.")
+    batch_size = max(min(128, int(available_memory // single_feature // 2)), 2)
+    return torch.device('cpu'), batch_size
 
 def main():
     # 从命令行接收参数
     parser = argparse.ArgumentParser(description="接收data_dir参数")
     parser.add_argument("--data_dir", type=str, help="数据目录路径")
-    parser.add_argument("--out_dir", type=str, help="输出路径")    
+    parser.add_argument("--out_dir", type=str, help="输出路径")
     parser.add_argument("--model_path", type=str, help="模型路径")
     parser.add_argument("--threads", type=str, help="模型路径")
 
@@ -245,13 +251,15 @@ def main():
     outpath = args.out_dir
     file_path = args.data_dir
     model_path = args.model_path
-    print(model_path)
+    threads = int(args.threads)
+    print('Loading model from %s', model_path)
 
-    device_id = 3
-    device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
+    device, batch_size = get_device()
     model = CNNCAT()
     state_dict = torch.load(model_path, map_location=device)
-
+    # threads = max(1, threads // 2)
+    # threads = max(1, threads - 1)
+    # torch.set_num_threads(threads)
     if next(iter(state_dict)).startswith("module."): # 4 剥除权重文件中的module层
         new_state_dict = OrderedDict()
         for k, v in state_dict.items():
@@ -259,29 +267,24 @@ def main():
             new_state_dict[name] = v
         state_dict = new_state_dict
 
-    # model = torch.nn.DataParallel(model)
     model.load_state_dict(state_dict)
-    # model = model.module.cpu()
-    # device=torch.device('cuda')
     model = model.to(device)
     print('model loaded done!')
-  
+
     img_features, freq_features, ltr_names = align2pileup(file_path)
-    print(img_features.shape)
+    # print(img_features.shape)
     img_features = F.normalize(img_features, p=2, dim=1)
     freq_features = F.normalize(freq_features, p=2, dim=1)
     dataset = torch.utils.data.TensorDataset(img_features, freq_features)
-    
-    batch_size = 32
-    # device, batch_size = choice_device()
-    
+
     model.eval()
-    # batch_size = 32
-    val_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    num_workers = max(1, threads)
+    val_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     preds = []
     probs_array = []
     with torch.no_grad():
-        for batch_x, batch_kmer in tqdm(val_loader):
+        # for batch_x, batch_kmer in tqdm(val_loader):
+        for i, (batch_x, batch_kmer) in enumerate(val_loader):
             batch_x = batch_x.to(device)
             batch_kmer = batch_kmer.to(device)
             outputs = model(batch_x, batch_kmer)
@@ -289,21 +292,11 @@ def main():
             _, predicted = torch.max(probs, 1)
             probs_array.extend(probs)
 
-
-            # probs = F.softmax(outputs, dim=1)
-            # prob_class1 = probs[:, 1]
-            # prob_class0 = probs[:, 0]
-            # prob_diff = prob_class1 - prob_class0
-            # predicted = (prob_diff > 0.7).int()
-
             preds.extend(predicted.cpu().numpy())
     with open(outpath + '/is_LTR_deep.txt', 'w') as fw:
         for i in range(len(ltr_names)):
             fw.write(ltr_names[i] + '\t' + str(preds[i]) + '\n')
 
-    # with open(outpath + '/probs.txt', 'w') as fw:
-    #     for i in range(len(ltr_names)):
-    #         fw.write(f'{ltr_names[i]}\t{probs_array[i]}\n')
 
 if __name__ == "__main__":
     main()
