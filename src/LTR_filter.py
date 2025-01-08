@@ -626,7 +626,7 @@ if __name__ == '__main__':
         # 将数据划分成多个块，防止中间文件过大导致磁盘空间不足
         max_copy_num = 100
         # 分块大小（每次处理的序列数）
-        chunk_size = 1000
+        chunk_size = 5000
         result_files = []
         # 读取 left_ltr_path
         ltr_names, ltr_contigs = read_fasta(left_ltr_path)
